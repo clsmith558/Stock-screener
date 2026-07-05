@@ -1,0 +1,20 @@
+{
+  "meta": {
+    "vault_path": "",
+    "screener_export": "data/company_registry.json",
+    "version": 1
+  },
+  "companies": {
+    "AAPL": {
+      "names": ["Apple", "Apple Inc."],
+      "tickers": ["AAPL"],
+      "wiki": {
+        "sector_moc": "Sector-Technology",
+        "anchor": "Apple (BB)",
+        "power_map": null,
+        "opportunity_memo": "opportunities/AAPL"
+      },
+      "coverage_tier": "A"
+    }
+  }
+}

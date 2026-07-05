@@ -1,0 +1,2463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Signal Screener • Business Lists + Buybacks</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <style>
+        body { font-family: system-ui, sans-serif; }
+        .stock-row:hover { background: #f8fafc; }
+        .filter-input { width: 100%; padding: 0.35rem 0.5rem; background: white; border: 1px solid #cbd5e1; border-radius: 0.75rem; font-size: 0.8rem; }
+        .filter-input:focus { outline: none; border-color: #2dd4bf; }
+        .filter-label { display: block; font-size: 0.65rem; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 0.2rem; }
+        .filter-group { margin-bottom: 0.85rem; }
+        .industry-list { max-height: 7.5rem; overflow-y: auto; border: 1px solid #e2e8f0; border-radius: 0.75rem; padding: 0.4rem; background: #fafafa; }
+        .industry-check { display: flex; align-items: flex-start; gap: 0.35rem; padding: 0.15rem 0; font-size: 0.7rem; line-height: 1.2; color: #475569; cursor: pointer; }
+        .industry-check input { margin-top: 0.1rem; accent-color: #0d9488; }
+        #table-head th, #table-body td { padding: 0.35rem 0.45rem; }
+        .col-company { max-width: 11rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .range-display { font-size: 0.7rem; color: #475569; margin-bottom: 0.35rem; font-variant-numeric: tabular-nums; }
+        .dual-range { position: relative; height: 22px; margin: 0.15rem 0 0.1rem; }
+        .dual-range input[type=range] {
+            position: absolute; left: 0; right: 0; width: 100%; margin: 0;
+            pointer-events: none; background: transparent;
+            -webkit-appearance: none; appearance: none; height: 22px;
+        }
+        .dual-range input[type=range]::-webkit-slider-runnable-track {
+            height: 4px; background: #e2e8f0; border-radius: 2px;
+        }
+        .dual-range input[type=range]::-webkit-slider-thumb {
+            pointer-events: all; -webkit-appearance: none; appearance: none;
+            width: 14px; height: 14px; border-radius: 50%;
+            background: #0d9488; border: 2px solid white; box-shadow: 0 1px 3px rgba(0,0,0,.2);
+            margin-top: -5px; cursor: grab;
+        }
+        .dual-range input[type=range]::-moz-range-track { height: 4px; background: #e2e8f0; border-radius: 2px; }
+        .dual-range input[type=range]::-moz-range-thumb {
+            pointer-events: all; width: 14px; height: 14px; border-radius: 50%;
+            background: #0d9488; border: 2px solid white; box-shadow: 0 1px 3px rgba(0,0,0,.2);
+            cursor: grab;
+        }
+    </style>
+</head>
+<body class="bg-slate-50">
+    <div class="bg-slate-900 text-white px-6 py-4">
+        <div class="w-full max-w-none px-4 lg:px-6 mx-auto flex justify-between items-center">
+            <div class="flex items-center gap-3">
+                <div class="w-8 h-8 bg-teal-500 rounded-xl flex items-center justify-center">
+                    <i class="fa-solid fa-chart-line"></i>
+                </div>
+                <span class="text-2xl font-semibold">Signal Screener</span>
+            </div>
+            <div class="flex items-center gap-4 text-sm">
+                <span id="last-updated" class="text-slate-400"></span>
+                <button onclick="refresh()" 
+                        class="px-4 py-1.5 bg-slate-800 rounded-xl text-xs font-medium flex items-center gap-2">
+                    <i class="fa-solid fa-sync"></i> Refresh
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div class="w-full max-w-none px-3 lg:px-5 pt-8 pb-10">
+        <div class="flex gap-4 lg:gap-5 items-start">
+            <!-- Left sidebar: filters -->
+            <aside id="filters-sidebar" class="w-56 shrink-0 sticky top-4">
+                <div class="bg-white border rounded-3xl p-4 shadow-sm">
+                    <div class="flex items-center justify-between mb-3">
+                        <span class="text-xs font-bold text-slate-700 uppercase tracking-wide">Filters</span>
+                        <button onclick="clearFilters()" class="text-[10px] text-slate-400 hover:text-slate-600">Clear all</button>
+                    </div>
+
+                    <div class="filter-group">
+                        <div class="flex items-center justify-between">
+                            <label class="filter-label mb-0">Industry / Sector</label>
+                            <button type="button" onclick="clearIndustryFilter()" class="text-[9px] text-slate-400 hover:text-slate-600">Clear</button>
+                        </div>
+                        <div id="industry-filter-list" class="industry-list mt-1">
+                            <div class="text-[10px] text-slate-400 px-1">Loading...</div>
+                        </div>
+                    </div>
+
+                    <div class="filter-group">
+                        <label class="flex items-center gap-2 cursor-pointer text-xs">
+                            <input type="checkbox" id="filter-signals-only" onchange="onSignalsOnlyChange()">
+                            <span>Buyback / insider activity only</span>
+                        </label>
+                        <div class="text-[9px] text-slate-400 mt-0.5">Intersects current list with signal registry</div>
+                    </div>
+
+                    <div id="buybacks-exchange-filter" class="filter-group hidden">
+                        <div class="flex items-center justify-between">
+                            <label class="filter-label mb-0">Exchange</label>
+                            <button type="button" onclick="clearBuybacksExchangeFilter()" class="text-[9px] text-slate-400 hover:text-slate-600">All</button>
+                        </div>
+                        <div class="mt-1 space-y-1 text-xs">
+                            <label class="flex items-center gap-2 cursor-pointer">
+                                <input type="checkbox" id="filter-exchange-asx" checked onchange="applyFilters()">
+                                <span>ASX</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer">
+                                <input type="checkbox" id="filter-exchange-hk" checked onchange="applyFilters()">
+                                <span>Hong Kong (HKEX)</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer">
+                                <input type="checkbox" id="filter-exchange-tse" checked onchange="applyFilters()">
+                                <span>Tokyo (TSE)</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer">
+                                <input type="checkbox" id="filter-exchange-us" checked onchange="applyFilters()">
+                                <span>US (SEC EDGAR)</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div id="buybacks-us-index-filter" class="filter-group hidden">
+                        <div class="flex items-center justify-between">
+                            <label class="filter-label mb-0">US Index</label>
+                            <button type="button" onclick="clearBuybacksUsIndexFilter()" class="text-[9px] text-slate-400 hover:text-slate-600">All</button>
+                        </div>
+                        <div class="mt-1 space-y-1 text-xs">
+                            <label class="flex items-center gap-2 cursor-pointer">
+                                <input type="checkbox" id="filter-us-russell1000" checked onchange="applyFilters()">
+                                <span>Russell 1000</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer">
+                                <input type="checkbox" id="filter-us-nasdaq100" checked onchange="applyFilters()">
+                                <span>Nasdaq-100</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="filter-group">
+                        <label class="filter-label" for="search-filter">Ticker / Name</label>
+                        <input id="search-filter" type="text" placeholder="Search..." class="filter-input" oninput="applyFilters()">
+                    </div>
+
+                    <div class="filter-group" data-filter="price">
+                        <label class="filter-label">Price (local ccy)</label>
+                        <div class="range-display" id="display-price">—</div>
+                        <div class="dual-range">
+                            <input type="range" id="slider-min-price" oninput="onSliderInput('price', 'min')">
+                            <input type="range" id="slider-max-price" oninput="onSliderInput('price', 'max')">
+                        </div>
+                    </div>
+
+                    <div class="filter-group" data-filter="pe">
+                        <label class="filter-label">P/E</label>
+                        <div class="range-display" id="display-pe">—</div>
+                        <div class="dual-range">
+                            <input type="range" id="slider-min-pe" oninput="onSliderInput('pe', 'min')">
+                            <input type="range" id="slider-max-pe" oninput="onSliderInput('pe', 'max')">
+                        </div>
+                    </div>
+
+                    <div class="filter-group" data-filter="pb">
+                        <label class="filter-label">P/B</label>
+                        <div class="range-display" id="display-pb">—</div>
+                        <div class="dual-range">
+                            <input type="range" id="slider-min-pb" oninput="onSliderInput('pb', 'min')">
+                            <input type="range" id="slider-max-pb" oninput="onSliderInput('pb', 'max')">
+                        </div>
+                    </div>
+
+                    <div class="filter-group" data-filter="mcap">
+                        <label class="filter-label">Market Cap ($M)</label>
+                        <div class="range-display" id="display-mcap">—</div>
+                        <div class="dual-range">
+                            <input type="range" id="slider-min-mcap" oninput="onSliderInput('mcap', 'min')">
+                            <input type="range" id="slider-max-mcap" oninput="onSliderInput('mcap', 'max')">
+                        </div>
+                    </div>
+
+                    <div class="text-[9px] text-slate-400 mt-2 pt-2 border-t">Click table headers to sort</div>
+                </div>
+            </aside>
+
+            <!-- Main content -->
+            <main class="flex-1 min-w-0">
+                <!-- Business Lists -->
+                <div id="business-controls" class="mb-4">
+                    <div class="flex items-center gap-3 flex-wrap text-sm">
+                        <span class="font-medium text-slate-600">List:</span>
+                        <select id="business-list-select" onchange="onBusinessListChange()"
+                                class="text-xs px-3 py-1.5 border border-slate-200 rounded-2xl bg-white min-w-[14rem] max-w-full">
+                            <option value="">Loading lists...</option>
+                        </select>
+                        <button onclick="rebuildBusinessYf()" id="btn-rebuild-business-yf"
+                                class="px-2 py-0.5 rounded-xl text-[10px] bg-rose-100 text-rose-700 hover:bg-rose-200">
+                            <i class="fa-solid fa-sync fa-xs"></i> Rebuild YF data (slow)
+                        </button>
+                    </div>
+                    <div id="signal-data-controls" class="hidden mt-3 pt-3 border-t border-slate-200">
+                        <div class="text-[10px] font-medium text-slate-500 mb-2">Update signal data sources</div>
+                        <div class="flex items-center gap-3 flex-wrap text-sm">
+                        <button onclick="refreshJpxBuybacks()" id="btn-refresh-jpx"
+                                class="text-xs px-3 py-1.5 bg-teal-100 hover:bg-teal-200 text-teal-800 rounded-2xl font-medium flex items-center gap-2">
+                            <i class="fa-solid fa-cloud-arrow-down"></i>
+                            <span>Refresh JPX data</span>
+                        </button>
+                        <button onclick="refreshHkexBuybacks()" id="btn-refresh-hkex"
+                                class="text-xs px-3 py-1.5 bg-indigo-100 hover:bg-indigo-200 text-indigo-800 rounded-2xl font-medium flex items-center gap-2">
+                            <i class="fa-solid fa-cloud-arrow-down"></i>
+                            <span>Refresh HKEX data</span>
+                        </button>
+                        <button onclick="refreshHkInsiderBuybacks()" id="btn-refresh-hk-insider"
+                                class="text-xs px-3 py-1.5 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 rounded-2xl font-medium flex items-center gap-2">
+                            <i class="fa-solid fa-user-tie"></i>
+                            <span>Refresh HK insider data</span>
+                        </button>
+                        <button onclick="refreshAsxBuybacks()" id="btn-refresh-asx"
+                                class="text-xs px-3 py-1.5 bg-amber-100 hover:bg-amber-200 text-amber-900 rounded-2xl font-medium flex items-center gap-2">
+                            <i class="fa-solid fa-cloud-arrow-down"></i>
+                            <span>Refresh ASX data</span>
+                        </button>
+                        <button onclick="refreshUsBuybacks()" id="btn-refresh-us"
+                                class="text-xs px-3 py-1.5 bg-sky-100 hover:bg-sky-200 text-sky-900 rounded-2xl font-medium flex items-center gap-2">
+                            <i class="fa-solid fa-landmark"></i>
+                            <span>Refresh US SEC data</span>
+                        </button>
+                        <button onclick="rebuildBuybacksYf()" id="btn-rebuild-buybacks-yf"
+                                class="px-2 py-0.5 rounded-xl text-[10px] bg-rose-100 text-rose-700 hover:bg-rose-200">
+                            <i class="fa-solid fa-sync fa-xs"></i> Rebuild YF data (slow)
+                        </button>
+                        </div>
+                        <div class="mt-1 text-[10px] text-amber-600">
+                            Aggregates JPX TSE, HKEX repurchases &amp; director dealings, ASX buy-backs &amp; insider purchases, and US SEC EDGAR buybacks + Form 4 insider purchases.
+                        </div>
+                    </div>
+                    <span id="business-info" class="block mt-2 text-xs text-slate-500"></span>
+                    <span id="buybacks-info" class="hidden block mt-1 text-xs text-slate-500"></span>
+                    <div class="mt-1 text-[10px] text-amber-600">
+                        Pick a list or enable “Buyback / insider activity only” to filter. Instant load from cache — pending rows fill in after Rebuild YF.
+                    </div>
+                </div>
+
+                <!-- ASX-only: periodic universe update control -->
+                <div id="asx-controls" class="hidden mb-4">
+                    <button onclick="updateAsxUniverse(event)"
+                            class="text-xs px-3 py-1.5 bg-amber-100 hover:bg-amber-200 active:bg-amber-300 text-amber-800 rounded-2xl font-medium flex items-center gap-2 transition">
+                        <i class="fa-solid fa-database"></i>
+                        <span>Update ASX company list (~every 6 months)</span>
+                    </button>
+                    <span id="universe-info" class="ml-3 text-xs text-slate-500 align-middle"></span>
+                </div>
+
+                <!-- View switcher -->
+                <div id="view-switcher" class="hidden mb-3">
+                    <div class="flex items-center gap-2 text-sm">
+                        <span class="font-medium text-slate-600">ASX View:</span>
+                        <button onclick="setView('signals')" id="btn-view-signals"
+                                class="px-3 py-1 rounded-2xl text-xs font-semibold bg-teal-600 text-white flex items-center gap-1">
+                            <i class="fa-solid fa-filter"></i> Signals only (insider/buybacks)
+                        </button>
+                        <button onclick="setView('all')" id="btn-view-all"
+                                class="px-3 py-1 rounded-2xl text-xs font-semibold bg-slate-200 text-slate-700 hover:bg-slate-300 flex items-center gap-1">
+                            <i class="fa-solid fa-list"></i> Full list (~all ASX; click headers to sort)
+                        </button>
+                        <button onclick="rebuildYf()" id="btn-rebuild-yf"
+                                class="ml-2 px-2 py-0.5 rounded-xl text-[10px] bg-rose-100 text-rose-700 hover:bg-rose-200 hidden">
+                            <i class="fa-solid fa-sync fa-xs"></i> Rebuild YF data (hours, ~monthly)
+                        </button>
+                    </div>
+                    <div id="full-note" class="hidden mt-1 text-[10px] text-amber-600">
+                        Full list uses persistent yf cache (30d default). Normal loads = 0 yf calls. "Rebuild YF" does *one ticker at a time* (2s sleeps) -- can take hours for 1979. Watch server logs / use CLI for heavy jobs. Run ~every 2-4 weeks.
+                    </div>
+                </div>
+
+                <div id="kpi-row" class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6"></div>
+
+                <div class="bg-white border rounded-3xl overflow-x-auto relative min-h-[12rem]">
+                    <div id="table-loading" class="hidden absolute inset-0 bg-white/80 flex items-center justify-center z-10 rounded-3xl">
+                        <div class="text-slate-500 text-sm flex items-center gap-2">
+                            <i class="fa-solid fa-spinner fa-spin"></i>
+                            <span id="table-loading-text">Loading...</span>
+                        </div>
+                    </div>
+                    <table class="w-full text-xs">
+                        <thead class="bg-slate-100">
+                            <tr id="table-head">
+                                <!-- Populated dynamically by renderTable() -->
+                            </tr>
+                        </thead>
+                        <tbody id="table-body" class="divide-y"></tbody>
+                    </table>
+                </div>
+
+                <div class="mt-3 text-xs text-slate-500 flex justify-between">
+                    <div><span id="count"></span></div>
+                    <div id="source-info" class="font-medium"></div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <script>
+        const BUILTIN_BUYBACKS_LIST_ID = '__builtin__:buybacks';
+        let currentMarket = 'business';
+        let currentView = 'signals';
+        let businessLists = [];
+        let currentBusinessList = '';
+        let filterSignalsOnly = false;
+
+        function isBuybacksList() {
+            return currentBusinessList === BUILTIN_BUYBACKS_LIST_ID;
+        }
+
+        function showBuybackFeatures() {
+            return isBuybacksList() || filterSignalsOnly;
+        }
+
+        function showSignalSourceControls() {
+            return isBuybacksList();
+        }
+        let allData = [];
+        let lastMeta = {};
+        const marketDataCache = {};
+        let buybacksYfPollTimer = null;
+        let buybacksYfRebuildNote = '';
+        let usSecScanNote = '';
+        let usSecPollTimer = null;
+        const MARKET_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour client-side tab cache
+        let activeLoadId = 0; // guards against stale in-flight fetches overwriting the table
+        let activeFetchController = null;
+        // Client-side filter + sort state
+        let currentIndustries = [];
+        let currentSearch = '';
+        let filterMinPrice = null;
+        let filterMaxPrice = null;
+        let filterMinPE = null;
+        let filterMaxPE = null;
+        let filterMinPB = null;
+        let filterMaxPB = null;
+        let filterMinMcap = null;
+        let filterMaxMcap = null;
+        let currentSortCol = null;
+        let currentSortDir = 'asc';
+
+        function stockBuybackExchange(stock) {
+            const t = (stock.ticker || '').toUpperCase();
+            const src = (stock.buyback_source || '').toUpperCase();
+            if (src.includes('SEC-4')) return 'us';
+            if (src.includes('SEC')) return 'us';
+            if (t.endsWith('.AX')) return 'asx';
+            if (t.endsWith('.HK')) return 'hk';
+            if (t.endsWith('.T')) return 'tse';
+            if (!t.endsWith('.AX') && !t.endsWith('.HK') && !t.endsWith('.T')) {
+                if (!t.includes('.') || t.includes('-')) return 'us';
+            }
+            return 'other';
+        }
+
+        function getSelectedBuybacksExchanges() {
+            const asx = document.getElementById('filter-exchange-asx');
+            const hk = document.getElementById('filter-exchange-hk');
+            const tse = document.getElementById('filter-exchange-tse');
+            const us = document.getElementById('filter-exchange-us');
+            return {
+                asx: asx ? asx.checked : true,
+                hk: hk ? hk.checked : true,
+                tse: tse ? tse.checked : true,
+                us: us ? us.checked : true,
+            };
+        }
+
+        function clearBuybacksExchangeFilter() {
+            ['filter-exchange-asx', 'filter-exchange-hk', 'filter-exchange-tse', 'filter-exchange-us'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.checked = true;
+            });
+        }
+
+        function passesBuybacksExchangeFilter(stock) {
+            if (!showBuybackFeatures()) return true;
+            const sel = getSelectedBuybacksExchanges();
+            if (!sel.asx && !sel.hk && !sel.tse && !sel.us) return true;
+            const ex = stockBuybackExchange(stock);
+            if (ex === 'asx') return sel.asx;
+            if (ex === 'hk') return sel.hk;
+            if (ex === 'tse') return sel.tse;
+            if (ex === 'us') return sel.us;
+            return true;
+        }
+
+        function getSelectedUsIndices() {
+            const r1k = document.getElementById('filter-us-russell1000');
+            const ndx = document.getElementById('filter-us-nasdaq100');
+            return {
+                russell1000: r1k ? r1k.checked : true,
+                nasdaq100: ndx ? ndx.checked : true,
+            };
+        }
+
+        function clearBuybacksUsIndexFilter() {
+            ['filter-us-russell1000', 'filter-us-nasdaq100'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.checked = true;
+            });
+            applyFilters();
+        }
+
+        function passesBuybacksUsIndexFilter(stock) {
+            if (!showBuybackFeatures()) return true;
+            const sel = getSelectedUsIndices();
+            if (sel.russell1000 && sel.nasdaq100) return true;
+            if (!sel.russell1000 && !sel.nasdaq100) return true;
+            if (stockBuybackExchange(stock) !== 'us') return true;
+            const indices = stock.us_indices || [];
+            if (sel.russell1000 && indices.includes('russell1000')) return true;
+            if (sel.nasdaq100 && indices.includes('nasdaq100')) return true;
+            return false;
+        }
+
+        // ── FILTER DEFAULTS (edit these to change slider bounds & starting ranges) ──
+        // absMin/absMax = slider track endpoints; defaultMin/defaultMax = initial thumb positions
+        const FILTER_DEFAULTS = {
+            price: { absMin: 0.01, absMax: 200000,  defaultMin: 0.05, defaultMax: 200000,  step: 0.05,  fmt: v => '$' + v.toFixed(2) },
+            pe:    { absMin: 0.01, absMax: 100,   defaultMin: 0.01, defaultMax: 100,   step: 0.5,   fmt: v => v.toFixed(1) },
+            pb:    { absMin: 0.01, absMax: 100,    defaultMin: 0.01, defaultMax: 100,    step: 0.2,   fmt: v => v.toFixed(1) },
+            mcap:  { absMin: 0,    absMax: 5000000000, defaultMin: 0,    defaultMax: 5000000000, step: 1000000,    fmt: v => '$' + Math.round(v) + 'M' },
+        };
+
+        function initFilterSliders() {
+            Object.entries(FILTER_DEFAULTS).forEach(([key, cfg]) => {
+                const minEl = document.getElementById('slider-min-' + key);
+                const maxEl = document.getElementById('slider-max-' + key);
+                if (!minEl || !maxEl) return;
+                [minEl, maxEl].forEach(el => {
+                    el.min = cfg.absMin;
+                    el.max = cfg.absMax;
+                    el.step = cfg.step;
+                });
+                minEl.value = cfg.defaultMin;
+                maxEl.value = cfg.defaultMax;
+                updateSliderDisplay(key);
+            });
+            syncFilterStateFromSliders();
+        }
+
+        function updateSliderDisplay(key) {
+            const cfg = FILTER_DEFAULTS[key];
+            const minEl = document.getElementById('slider-min-' + key);
+            const maxEl = document.getElementById('slider-max-' + key);
+            const disp = document.getElementById('display-' + key);
+            if (!minEl || !maxEl || !disp || !cfg) return;
+            disp.textContent = cfg.fmt(parseFloat(minEl.value)) + ' – ' + cfg.fmt(parseFloat(maxEl.value));
+        }
+
+        function onSliderInput(key, which) {
+            const cfg = FILTER_DEFAULTS[key];
+            const minEl = document.getElementById('slider-min-' + key);
+            const maxEl = document.getElementById('slider-max-' + key);
+            let lo = parseFloat(minEl.value);
+            let hi = parseFloat(maxEl.value);
+            if (lo > hi) {
+                if (which === 'min') { lo = hi; minEl.value = lo; }
+                else { hi = lo; maxEl.value = hi; }
+            }
+            updateSliderDisplay(key);
+            syncFilterStateFromSliders();
+            renderTable();
+            renderKPIs(lastMeta);
+        }
+
+        function syncFilterStateFromSliders() {
+            filterMinPrice = parseFloat(document.getElementById('slider-min-price')?.value);
+            filterMaxPrice = parseFloat(document.getElementById('slider-max-price')?.value);
+            filterMinPE = parseFloat(document.getElementById('slider-min-pe')?.value);
+            filterMaxPE = parseFloat(document.getElementById('slider-max-pe')?.value);
+            filterMinPB = parseFloat(document.getElementById('slider-min-pb')?.value);
+            filterMaxPB = parseFloat(document.getElementById('slider-max-pb')?.value);
+            filterMinMcap = parseFloat(document.getElementById('slider-min-mcap')?.value);
+            filterMaxMcap = parseFloat(document.getElementById('slider-max-mcap')?.value);
+        }
+
+        const CURRENCY_META = {
+            USD: { symbol: '$', decimals: 2 }, AUD: { symbol: 'A$', decimals: 2 },
+            JPY: { symbol: '¥', decimals: 0 }, GBP: { symbol: '£', decimals: 2 },
+            EUR: { symbol: '€', decimals: 2 }, HKD: { symbol: 'HK$', decimals: 2 },
+            CAD: { symbol: 'C$', decimals: 2 }, CNY: { symbol: '¥', decimals: 2 },
+            CHF: { symbol: 'CHF ', decimals: 2 }, SGD: { symbol: 'S$', decimals: 2 },
+            NZD: { symbol: 'NZ$', decimals: 2 }, KRW: { symbol: '₩', decimals: 0 },
+            INR: { symbol: '₹', decimals: 2 }, TWD: { symbol: 'NT$', decimals: 2 },
+            BRL: { symbol: 'R$', decimals: 2 }, MXN: { symbol: 'MX$', decimals: 2 },
+        };
+
+        function inferCurrencyFromTicker(ticker) {
+            const t = (ticker || '').toUpperCase();
+            if (t.endsWith('.AX')) return 'AUD';
+            if (t.endsWith('.T')) return 'JPY';
+            if (t.endsWith('.HK')) return 'HKD';
+            if (t.endsWith('.L')) return 'GBP';
+            if (t.endsWith('.TO') || t.endsWith('.V')) return 'CAD';
+            if (t.endsWith('.NS') || t.endsWith('.BO')) return 'INR';
+            if (t.endsWith('.SW')) return 'CHF';
+            if (t.endsWith('.PA') || t.endsWith('.DE') || t.endsWith('.MI')) return 'EUR';
+            if (t.endsWith('.KS') || t.endsWith('.KQ')) return 'KRW';
+            if (t.endsWith('.SI')) return 'SGD';
+            if (t.endsWith('.NZ')) return 'NZD';
+            if (t.endsWith('.SA')) return 'BRL';
+            if (t.endsWith('.MX')) return 'MXN';
+            if (t.endsWith('.TW')) return 'TWD';
+            return 'USD';
+        }
+
+        function getStockCurrency(stock) {
+            return (stock?.currency || stock?.metrics?.currency || inferCurrencyFromTicker(stock?.ticker) || 'USD').toUpperCase();
+        }
+
+        function currencyMeta(code) {
+            const c = (code || 'USD').toUpperCase();
+            return CURRENCY_META[c] || { symbol: c + ' ', decimals: 2 };
+        }
+
+        function formatMoney(amount, currency, opts = {}) {
+            if (amount == null || isNaN(amount)) return opts.empty != null ? opts.empty : '—';
+            if (!opts.allowZero && amount === 0) return opts.empty != null ? opts.empty : '—';
+            const meta = currencyMeta(currency);
+            const dec = opts.decimals != null ? opts.decimals : meta.decimals;
+            const sign = amount < 0 ? '-' : '';
+            const abs = Math.abs(amount);
+            let text;
+            if (opts.compact) {
+                if (abs >= 1e12) text = (abs / 1e12).toFixed(1) + 'T';
+                else if (abs >= 1e9) text = (abs / 1e9).toFixed(1) + 'B';
+                else if (abs >= 1e6) text = Math.round(abs / 1e6) + 'M';
+                else text = abs.toLocaleString(undefined, { maximumFractionDigits: dec });
+            } else {
+                text = abs.toLocaleString(undefined, { minimumFractionDigits: dec, maximumFractionDigits: dec });
+            }
+            return sign + meta.symbol + text;
+        }
+
+        function formatPrice(val, stock) {
+            const cur = getStockCurrency(stock);
+            return formatMoney(val, cur, { decimals: cur === 'JPY' || cur === 'KRW' ? 0 : 2, allowZero: false });
+        }
+
+        function formatMarketCap(cap, stock) {
+            return formatMoney(cap, getStockCurrency(stock), { compact: true });
+        }
+
+        function formatEdgarEarnings(val) {
+            if (val == null || isNaN(val)) return '—';
+            const sign = val < 0 ? '-' : '';
+            const abs = Math.abs(val);
+            if (abs >= 1e9) return sign + '$' + (abs / 1e9).toFixed(2) + 'B';
+            if (abs >= 1e6) return sign + '$' + Math.round(abs / 1e6) + 'M';
+            return sign + '$' + abs.toLocaleString();
+        }
+
+        function formatSharesCount(n) {
+            if (n == null || isNaN(n)) return '—';
+            if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+            if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+            return Math.round(n).toLocaleString();
+        }
+
+        function formatPctChange(val, decimals = 1) {
+            if (val == null || isNaN(val)) return '—';
+            const sign = val > 0 ? '+' : '';
+            return sign + Number(val).toFixed(decimals) + '%';
+        }
+
+        function shareChangeColorClass(pct) {
+            if (pct == null || isNaN(pct) || pct === 0) return '';
+            return pct < 0 ? 'text-emerald-600' : 'text-rose-600';
+        }
+
+        function isUsEdgarTicker(ticker) {
+            const t = (ticker || '').toUpperCase();
+            if (!t) return false;
+            return !/\.(AX|T|HK|L|TO|V|NS|BO|SW|PA|DE|MI|KS|KQ|SI|NZ|SA|MX|TW)$/i.test(t);
+        }
+
+        function showEdgarForStock(stock) {
+            if (!stock) return false;
+            if (stock._market === 'us' || stock._edgar_eligible) return true;
+            const edgar = stock.edgar || {};
+            if (edgar.roic_history?.length || edgar.share_count_history?.length || edgar.earnings_history?.length) return true;
+            if ((getVal(stock, 'roic_latest') || 0) !== 0) return true;
+            return isUsEdgarTicker(stock.ticker);
+        }
+
+        function showEdgarColumns() {
+            return currentMarket === 'business';
+        }
+
+        function formatInsiderOwnership(stock) {
+            const v = getVal(stock, 'insider_ownership_pct');
+            if (v == null || isNaN(v)) return '—';
+            return Number(v).toFixed(1) + '%';
+        }
+
+        function formatNetCash(millions, stock) {
+            if (millions == null || isNaN(millions)) return '—';
+            if (millions === 0) return formatMoney(0, getStockCurrency(stock), { compact: true, allowZero: true });
+            return formatMoney(millions * 1e6, getStockCurrency(stock), { compact: true, allowZero: true });
+        }
+
+        function formatNetCashPct(pct) {
+            if (pct == null || isNaN(pct) || pct === 0) return '—';
+            const sign = pct > 0 ? '+' : '';
+            return sign + Number(pct).toFixed(1) + '%';
+        }
+
+        function netCashPctColorClass(pct) {
+            if (pct == null || isNaN(pct) || pct === 0) return '';
+            return pct > 0 ? 'text-emerald-600' : 'text-rose-600';
+        }
+
+        function netCashColorClass(millions) {
+            if (millions == null || isNaN(millions) || millions === 0) return '';
+            return millions > 0 ? 'text-emerald-600' : 'text-rose-600';
+        }
+
+        function formatAssetsVsMcapPct(pct) {
+            if (pct == null || isNaN(pct)) return '—';
+            const sign = pct > 0 ? '+' : '';
+            return sign + Number(pct).toFixed(1) + '%';
+        }
+
+        function assetsVsMcapColorClass(pct) {
+            if (pct == null || isNaN(pct) || pct === 0) return '';
+            return pct > 0 ? 'text-emerald-600' : 'text-rose-600';
+        }
+
+        function assetsVsMcapFromPb(stock) {
+            const mcap = getVal(stock, 'market_cap');
+            const pb = getVal(stock, 'pb');
+            if (!(mcap > 0) || !(pb > 0)) return null;
+            const netAssets = mcap / pb;
+            return {
+                net_assets_m: netAssets / 1e6,
+                net_assets_vs_mcap_m: (netAssets - mcap) / 1e6,
+                net_assets_vs_mcap_pct: ((netAssets - mcap) / mcap) * 100,
+            };
+        }
+
+        function formatDivYield(val) {
+            if (val == null || isNaN(val) || val === 0) return '—';
+            let v = Number(val);
+            if (v > 50) v = v / 100;
+            return v.toFixed(2) + '%';
+        }
+
+        function escapeHtml(text) {
+            const d = document.createElement('div');
+            d.textContent = text || '';
+            return d.innerHTML;
+        }
+
+        function getSelectedIndustries() {
+            const list = document.getElementById('industry-filter-list');
+            if (!list) return [];
+            return Array.from(list.querySelectorAll('input[type=checkbox]:checked')).map(cb => cb.value);
+        }
+
+        function clearIndustryFilter() {
+            const list = document.getElementById('industry-filter-list');
+            if (list) list.querySelectorAll('input[type=checkbox]').forEach(cb => { cb.checked = false; });
+            currentIndustries = [];
+            renderTable();
+            renderKPIs(lastMeta);
+        }
+
+        function gapColorClass(pct) {
+            if (pct == null || pct === 0) return '';
+            return pct < 0 ? 'text-rose-600' : (pct < 10 ? 'text-emerald-600' : '');
+        }
+
+        function isFullTableView(market) {
+            const m = market || currentMarket;
+            return m === 'business';
+        }
+
+        function clearTableForMarket(market) {
+            const body = document.getElementById('table-body');
+            const head = document.getElementById('table-head');
+            if (body) body.innerHTML = '';
+            if (head) {
+                const label = (market || currentMarket || '').toUpperCase() || 'DATA';
+                head.innerHTML = `<th class="p-4 text-slate-400 text-left" colspan="20">Loading ${label}...</th>`;
+            }
+            const countEl = document.getElementById('count');
+            if (countEl) countEl.textContent = 'Loading...';
+        }
+
+        function formatBuybackPct(pct) {
+            if (pct == null || isNaN(pct) || pct === 0) return '—';
+            return Number(pct).toFixed(2) + '%';
+        }
+
+        function wikiVaultLink(stock) {
+            const uri = stock.wiki_memo_uri || stock.wiki_sector_uri;
+            if (!uri) return '';
+            const title = stock.wiki_memo_uri ? 'Open vault memo in Obsidian' : 'Open sector MOC in Obsidian';
+            return `<a href="${uri}" class="ml-1 text-violet-600 hover:text-violet-800" title="${title}" onclick="event.stopPropagation()"><i class="fa-solid fa-book-open text-[10px]"></i></a>`;
+        }
+
+        const BUILTIN_SP500_LIST_ID = '__builtin__:sp500';
+        const BUILTIN_ASX_LIST_ID = '__builtin__:asx';
+
+        async function loadBusinessLists() {
+            try {
+                const res = await fetch('/api/business/lists');
+                const data = await res.json();
+                businessLists = data.lists || [];
+                const sel = document.getElementById('business-list-select');
+                if (!sel) return;
+                if (!businessLists.length) {
+                    sel.innerHTML = '<option value="">No CSV lists found</option>';
+                    currentBusinessList = '';
+                    return;
+                }
+                sel.innerHTML = businessLists.map(l => {
+                    const id = l.list_id || l.filename || '';
+                    const label = l.display_name || id;
+                    const count = l.ticker_count != null ? ` (${l.ticker_count})` : '';
+                    return `<option value="${escapeHtml(id)}">${escapeHtml(label)}${count}</option>`;
+                }).join('');
+                if (!currentBusinessList || !businessLists.some(l => (l.list_id || l.filename) === currentBusinessList)) {
+                    currentBusinessList = businessLists[0].list_id || businessLists[0].filename || '';
+                }
+                sel.value = currentBusinessList;
+            } catch (e) {
+                console.warn('Failed to load business lists', e);
+            }
+        }
+
+        function onBusinessListChange() {
+            const sel = document.getElementById('business-list-select');
+            currentBusinessList = sel ? sel.value : '';
+            if (!currentBusinessList) return;
+            if (isBuybacksList()) {
+                currentSortCol = 'annual_buyback_pct';
+                currentSortDir = 'desc';
+            } else if (currentSortCol === 'annual_buyback_pct' || currentSortCol === 'buyback_date') {
+                currentSortCol = 'pct_from_52w_low';
+                currentSortDir = 'asc';
+            }
+            const loadId = ++activeLoadId;
+            clearTableForMarket('business');
+            loadData('business', { loadId });
+        }
+
+        function onSignalsOnlyChange() {
+            const cb = document.getElementById('filter-signals-only');
+            filterSignalsOnly = !!(cb && cb.checked);
+            const loadId = ++activeLoadId;
+            clearTableForMarket('business');
+            loadData('business', { loadId });
+        }
+
+        function marketCacheKey(market) {
+            if (market === 'business') {
+                const sig = filterSignalsOnly ? ':signals' : '';
+                return `business:${currentBusinessList || ''}${sig}`;
+            }
+            if (market === 'asx') return `asx:${currentView}`;
+            return market;
+        }
+
+        function getCachedMarketData(market) {
+            const key = marketCacheKey(market);
+            const entry = marketDataCache[key];
+            if (!entry) return null;
+            if (Date.now() - entry.fetchedAt > MARKET_CACHE_TTL_MS) return null;
+            return entry;
+        }
+
+        function setCachedMarketData(market, stocks, meta) {
+            marketDataCache[marketCacheKey(market)] = {
+                stocks: stocks || [],
+                meta: meta || {},
+                fetchedAt: Date.now(),
+            };
+        }
+
+        function invalidateMarketCache(market) {
+            if (market) {
+                const prefix = market === 'business' ? 'business:' : (market === 'asx' ? 'asx:' : market);
+                Object.keys(marketDataCache).forEach(k => {
+                    if (k === market || k.startsWith(prefix)) delete marketDataCache[k];
+                });
+            } else {
+                Object.keys(marketDataCache).forEach(k => delete marketDataCache[k]);
+            }
+        }
+
+        function setTableLoading(show, text) {
+            const el = document.getElementById('table-loading');
+            const txt = document.getElementById('table-loading-text');
+            if (el) el.classList.toggle('hidden', !show);
+            if (txt && text) txt.textContent = text;
+        }
+
+        function applyMarketPayload(market, stocks, meta, loadInfo, loadId) {
+            if (loadId != null && loadId !== activeLoadId) return;
+            if (market !== currentMarket) return;
+            allData = stocks || [];
+            lastMeta = meta || {};
+            const isFull = isFullTableView(market);
+            if (isFull) {
+                if (!currentSortCol) {
+                    if (isBuybacksList() || filterSignalsOnly) {
+                        currentSortCol = 'annual_buyback_pct';
+                        currentSortDir = 'desc';
+                    } else {
+                        currentSortCol = 'pct_from_52w_low';
+                        currentSortDir = 'asc';
+                    }
+                }
+                if (isBuybacksList() || filterSignalsOnly) {
+                    allData.sort((a, b) => (b.annual_buyback_pct || 0) - (a.annual_buyback_pct || 0));
+                } else {
+                    allData.sort((a, b) => (a.pct_from_52w_low || 9999) - (b.pct_from_52w_low || 9999));
+                }
+            }
+            populateIndustryFilter(allData);
+            renderKPIs(meta);
+            renderTable(market);
+            updateMarketControls(market, meta, loadInfo);
+        }
+
+        function updateMarketControls(market, meta, loadInfo) {
+            const sourceEl = document.getElementById('source-info');
+            const timing = (meta && meta.timings_ms && meta.timings_ms.total_ms != null)
+                ? ` • server ${meta.timings_ms.total_ms}ms` : '';
+            const loadNote = loadInfo ? ` • ${loadInfo}${timing}` : timing;
+            if (sourceEl) {
+                sourceEl.innerHTML =
+                    `<span class="px-2 py-0.5 bg-slate-200 rounded text-slate-600">${meta.source || meta.data_source || ''}</span> • Last scraped: ${meta.last_scraped ? new Date(meta.last_scraped).toLocaleTimeString() : ''}${loadNote}`;
+            }
+
+            const asxCtrl = document.getElementById('asx-controls');
+            const businessCtrl = document.getElementById('business-controls');
+            const signalDataCtrl = document.getElementById('signal-data-controls');
+            const buybacksInfo = document.getElementById('buybacks-info');
+            const univInfo = document.getElementById('universe-info');
+            const businessInfo = document.getElementById('business-info');
+            const viewSwitcher = document.getElementById('view-switcher');
+            const fullNote = document.getElementById('full-note');
+            const rebuildBtn = document.getElementById('btn-rebuild-yf');
+            const isFull = isFullTableView();
+
+            const exFilter = document.getElementById('buybacks-exchange-filter');
+            const usIdxFilter = document.getElementById('buybacks-us-index-filter');
+            if (market === 'asx') {
+                if (asxCtrl) asxCtrl.classList.remove('hidden');
+                if (businessCtrl) businessCtrl.classList.add('hidden');
+                if (signalDataCtrl) signalDataCtrl.classList.add('hidden');
+                if (exFilter) exFilter.classList.add('hidden');
+                if (usIdxFilter) usIdxFilter.classList.add('hidden');
+                if (viewSwitcher) viewSwitcher.classList.remove('hidden');
+                if (univInfo) {
+                    const asof = meta.universe_as_of ? ('' + meta.universe_as_of).substring(0, 16) : 'n/a';
+                    let yfInfo = '';
+                    if (meta.yf_cached_count) {
+                        const newest = meta.yf_newest ? new Date(meta.yf_newest).toLocaleDateString() : '?';
+                        yfInfo = ` | YF cached: ${meta.yf_cached_count} (newest ~${newest})`;
+                    }
+                    univInfo.textContent = `Universe: ${meta.universe_count || '?'} companies (CSV as of ${asof})${yfInfo}`;
+                }
+                if (fullNote) fullNote.classList.toggle('hidden', !isFull);
+                if (rebuildBtn) rebuildBtn.classList.toggle('hidden', !isFull);
+                updateViewButtons();
+            } else if (market === 'business') {
+                if (asxCtrl) asxCtrl.classList.add('hidden');
+                if (businessCtrl) businessCtrl.classList.remove('hidden');
+                if (signalDataCtrl) signalDataCtrl.classList.toggle('hidden', !showSignalSourceControls());
+                if (exFilter) exFilter.classList.toggle('hidden', !showBuybackFeatures());
+                if (usIdxFilter) usIdxFilter.classList.toggle('hidden', !showBuybackFeatures());
+                if (viewSwitcher) viewSwitcher.classList.add('hidden');
+                if (univInfo) univInfo.textContent = '';
+                if (fullNote) fullNote.classList.add('hidden');
+                if (rebuildBtn) rebuildBtn.classList.add('hidden');
+                const sel = document.getElementById('business-list-select');
+                if (sel) {
+                    sel.disabled = false;
+                    if (currentBusinessList) sel.value = currentBusinessList;
+                }
+                const filterNote = filterSignalsOnly ? ' • activity filter on' : '';
+                if (businessInfo) {
+                    const pending = (allData || []).filter(x => x._pending_yf).length;
+                    const cached = (meta && meta.yf_cached_count) || 0;
+                    businessInfo.textContent =
+                        `${allData.length} tickers • ${cached} yf cached • ${pending} pending rebuild • ${meta.list_name || currentBusinessList || ''}${filterNote}`;
+                }
+                if (buybacksInfo) {
+                    if (isBuybacksList()) {
+                        buybacksInfo.classList.remove('hidden');
+                        const yr = meta.buyback_year || new Date().getFullYear();
+                        const tse = meta.tse_csv_rows != null ? meta.tse_csv_rows : '?';
+                        const hk = meta.hk_csv_rows != null ? meta.hk_csv_rows : '?';
+                        const hkDi = meta.hk_insider_csv_rows != null ? meta.hk_insider_csv_rows : '?';
+                        const insiderN = meta.insider_buy_count != null ? meta.insider_buy_count : '?';
+                        const asx = meta.asx_buyback_events != null ? meta.asx_buyback_events : '?';
+                        const asxDi = meta.asx_insider_rows != null ? meta.asx_insider_rows : '?';
+                        const asxBb = meta.asx_buyback_rows != null ? meta.asx_buyback_rows : asx;
+                        const asxFetched = meta.asx_last_fetched
+                            ? new Date(meta.asx_last_fetched).toLocaleString() : 'never';
+                        const usBb = meta.us_buyback_rows != null ? meta.us_buyback_rows : '?';
+                        const usDi = meta.us_insider_rows != null ? meta.us_insider_rows : '?';
+                        const usUniv = meta.us_universe_count != null ? meta.us_universe_count : '?';
+                        const usFetched = meta.us_last_fetched
+                            ? new Date(meta.us_last_fetched).toLocaleString() : 'never';
+                        const csvN = meta.csv_snapshot_count != null ? meta.csv_snapshot_count : '?';
+                        const yfN = meta.yf_cached_count != null ? meta.yf_cached_count : '?';
+                        let yfNote = buybacksYfRebuildNote ? ` • ${buybacksYfRebuildNote}` : '';
+                        let secNote = usSecScanNote ? ` • ${usSecScanNote}` : '';
+                        buybacksInfo.textContent =
+                            `Signal sources • ${yr} YTD • TSE: ${tse} • HK: ${hk} • HK insider: ${hkDi} • ASX: ${asxBb} buybacks / ${asxDi} insider • US: ${usUniv} tickers • SEC buybacks: ${usBb} / Form 4 insider: ${usDi} • ASX fetched: ${asxFetched} • US SEC: ${usFetched} • ${insiderN} insider buys YTD • ${csvN} CSV / ${yfN} live YF${secNote}${yfNote}`;
+                    } else {
+                        buybacksInfo.classList.add('hidden');
+                        buybacksInfo.textContent = '';
+                    }
+                }
+            } else {
+                if (asxCtrl) asxCtrl.classList.add('hidden');
+                if (businessCtrl) businessCtrl.classList.add('hidden');
+                if (signalDataCtrl) signalDataCtrl.classList.add('hidden');
+                if (exFilter) exFilter.classList.add('hidden');
+                if (usIdxFilter) usIdxFilter.classList.add('hidden');
+            }
+        }
+
+        function resetFiltersForMarketSwitch() {
+            currentIndustries = [];
+            currentSearch = '';
+            const searchEl = document.getElementById('search-filter');
+            if (searchEl) searchEl.value = '';
+            const list = document.getElementById('industry-filter-list');
+            if (list) list.querySelectorAll('input[type=checkbox]').forEach(cb => { cb.checked = false; });
+            clearBuybacksExchangeFilter();
+            clearBuybacksUsIndexFilter();
+            initFilterSliders();
+        }
+
+        async function loadData(market, options = {}) {
+            const forceRefresh = options.forceRefresh === true;
+            const background = options.background === true;
+            const loadId = options.loadId != null ? options.loadId : (background ? null : ++activeLoadId);
+
+            if (!background) {
+                currentMarket = market;
+            }
+
+            if (!forceRefresh && !background && loadId != null) {
+                const cached = getCachedMarketData(market);
+                if (cached) {
+                    if (loadId !== activeLoadId) return;
+                    applyMarketPayload(market, cached.stocks, cached.meta, 'client cache', loadId);
+                    loadData(market, { background: true });
+                    return;
+                }
+            }
+
+            if (!background && loadId != null) {
+                setTableLoading(true, isBuybacksList() ? 'Loading buybacks registry...' : 'Loading...');
+            }
+
+            let url = `/api/stocks?market=${market}`;
+            if (market === 'asx' && currentView === 'all') url += '&full=1';
+            if (market === 'business' && currentBusinessList) {
+                url += `&list=${encodeURIComponent(currentBusinessList)}`;
+            }
+            if (market === 'business' && filterSignalsOnly && !isBuybacksList()) {
+                url += '&signals_only=1';
+            }
+
+            const controller = new AbortController();
+            if (!background) {
+                if (activeFetchController) {
+                    try { activeFetchController.abort(); } catch (e) { /* ignore */ }
+                }
+                activeFetchController = controller;
+            }
+
+            const t0 = performance.now();
+            let loadInfo = 'loaded';
+            try {
+                const slowTimer = setTimeout(() => {
+                    if (!background && loadId != null && loadId === activeLoadId) {
+                        setTableLoading(true, 'Still loading — server may be busy with a background YF rebuild...');
+                    }
+                }, 5000);
+                const res = await fetch(url, { signal: controller.signal });
+                clearTimeout(slowTimer);
+                if (!res.ok) {
+                    throw new Error(`HTTP ${res.status} ${res.statusText}`);
+                }
+                const raw = await res.text();
+                let payload;
+                try {
+                    payload = JSON.parse(raw);
+                } catch (parseErr) {
+                    throw new Error('Invalid JSON from server (often caused by NaN values in data)');
+                }
+                const elapsed = Math.round(performance.now() - t0);
+                loadInfo = background ? `refreshed in ${elapsed}ms` : `loaded in ${elapsed}ms`;
+                const stocks = payload.stocks || [];
+                const meta = payload.meta || {};
+                setCachedMarketData(market, stocks, meta);
+                if (background) {
+                    if (market === currentMarket) {
+                        applyMarketPayload(market, stocks, meta, loadInfo, activeLoadId);
+                    }
+                    return;
+                }
+                if (loadId != null && loadId !== activeLoadId) return;
+                applyMarketPayload(market, stocks, meta, loadInfo, loadId);
+            } catch (e) {
+                if (e && e.name === 'AbortError') return;
+                if (!background && loadId != null && loadId === activeLoadId) {
+                    console.error('loadData failed', e);
+                    setTableLoading(false);
+                    const sourceEl = document.getElementById('source-info');
+                    if (sourceEl) sourceEl.textContent = 'Load failed: ' + (e.message || e) + ' — try Refresh';
+                }
+            } finally {
+                if (!background && loadId != null && loadId === activeLoadId) {
+                    setTableLoading(false);
+                    if (activeFetchController === controller) activeFetchController = null;
+                }
+            }
+        }
+
+        function preloadMarketData(market) {
+            if (getCachedMarketData(market)) return;
+            loadData(market, { background: true });
+        }
+
+        function getVal(stock, col) {
+            if (col === 'net_cash_m') {
+                const v = stock.metrics?.net_cash_m;
+                if (v != null && v !== '' && !isNaN(v)) return Number(v);
+                return null;
+            }
+            if (col === 'net_cash_pct_mcap') {
+                for (const src of [stock[col], stock.metrics?.[col]]) {
+                    if (src != null && src !== '' && !isNaN(src)) return Number(src);
+                }
+                return null;
+            }
+            if (col === 'insider_ownership_pct') {
+                for (const src of [stock[col], stock.metrics?.[col]]) {
+                    if (src != null && src !== '' && !isNaN(src) && Number(src) > 0) return Number(src);
+                }
+                return null;
+            }
+            const assetsVsMcapCols = ['net_assets_m', 'net_assets_vs_mcap_m', 'net_assets_vs_mcap_pct'];
+            if (assetsVsMcapCols.includes(col)) {
+                for (const src of [stock[col], stock.metrics?.[col]]) {
+                    if (src != null && src !== '' && !isNaN(src) && Number(src) !== 0) return Number(src);
+                }
+                const derived = assetsVsMcapFromPb(stock);
+                if (derived) return derived[col];
+                return null;
+            }
+            const edgarCols = ['roic_latest', 'roic_5y_avg', 'share_count_5y_change_pct', 'earnings_yoy_pct', 'earnings_5y_growth_pct'];
+            if (edgarCols.includes(col)) {
+                for (const src of [stock[col], stock.edgar?.[col], stock.metrics?.[col]]) {
+                    if (src != null && src !== '' && !isNaN(src)) return Number(src);
+                }
+                return null;
+            }
+            const metricCols = ['pe', 'pb', 'p_fcf', 'forward_pe', 'ev_ebitda', 'debt_to_equity', 'market_cap', 'pct_from_200w_ma', 'ma_200w'];
+            if (metricCols.includes(col)) {
+                for (const src of [stock[col], stock.metrics?.[col]]) {
+                    if (src != null && src !== '' && !isNaN(src)) {
+                        const n = Number(src);
+                        if (n !== 0) return n;
+                    }
+                }
+                return 0;
+            }
+            if (col === 'sector' || col === 'name' || col === 'ticker' || col === 'buyback_source' || col === 'buyback_date') {
+                return (stock[col] || '').toString();
+            }
+            if (col === 'annual_buyback_pct') {
+                const v = stock.annual_buyback_pct ?? stock.metrics?.annual_buyback_pct;
+                return (v != null && v !== '' && !isNaN(v)) ? Number(v) : 0;
+            }
+            let v = stock[col];
+            if (v == null && stock.metrics) v = stock.metrics[col];
+            return (v != null ? v : 0);
+        }
+
+        function isNumeric(val) {
+            return val != null && val !== '' && !isNaN(Number(val));
+        }
+
+        function inRange(value, min, max, requireValue) {
+            // Missing/invalid: optional filters pass through; required filters reject
+            if (!isNumeric(value)) return !requireValue;
+            const num = Number(value);
+            // Zero = unknown for optional metrics (e.g. no P/E in cache); still apply bounds for negatives
+            if (num === 0 && !requireValue) return true;
+            if (min != null && !isNaN(min) && num < min) return false;
+            if (max != null && !isNaN(max) && num > max) return false;
+            return true;
+        }
+
+        function passesRangeFilters(stock) {
+            const price = getVal(stock, 'current_price');
+            const pe = getVal(stock, 'pe');
+            const pb = getVal(stock, 'pb');
+            const mcap = getVal(stock, 'market_cap');
+
+            // ASX signals view: require valid price. Lists/US/business: show pending rows (price 0)
+            const requirePrice = (currentMarket === 'asx' && currentView === 'signals');
+            if (!inRange(price, filterMinPrice, filterMaxPrice, requirePrice)) return false;
+            // P/E, P/B: zero = unknown (pass); negative/out-of-range values are filtered
+            if (!inRange(pe, filterMinPE, filterMaxPE, false)) return false;
+            if (!inRange(pb, filterMinPB, filterMaxPB, false)) return false;
+            const mcapM = (isNumeric(mcap) && Number(mcap) > 0) ? Number(mcap) / 1e6 : null;
+            const strictMcap = filterMinMcap > 0;
+            if (!inRange(mcapM, filterMinMcap, filterMaxMcap, strictMcap)) return false;
+            return true;
+        }
+
+        function compareForSort(a, b, col, dir) {
+            let va = getVal(a, col);
+            let vb = getVal(b, col);
+            if (col === 'buyback_announced') {
+                va = va ? 1 : 0;
+                vb = vb ? 1 : 0;
+            }
+            // Prefer numeric compare when possible
+            let na = va, nb = vb;
+            const pa = parseFloat(va), pb = parseFloat(vb);
+            const bothNum = !isNaN(pa) && !isNaN(pb);
+            if (bothNum && (typeof va !== 'string' && typeof vb !== 'string' || (typeof va === 'number' || typeof vb === 'number'))) {
+                na = pa; nb = pb;
+            } else if (!bothNum) {
+                na = (va || '').toString().toLowerCase();
+                nb = (vb || '').toString().toLowerCase();
+            }
+            if (col === 'net_cash_m' || col === 'net_cash_pct_mcap' || col === 'net_assets_vs_mcap_m' || col === 'net_assets_vs_mcap_pct' || col === 'insider_ownership_pct' || col === 'roic_latest' || col === 'roic_5y_avg' || col === 'share_count_5y_change_pct' || col === 'earnings_yoy_pct' || col === 'earnings_5y_growth_pct') {
+                na = (va == null || isNaN(va)) ? -Infinity : va;
+                nb = (vb == null || isNaN(vb)) ? -Infinity : vb;
+            }
+            if (na < nb) return dir === 'asc' ? -1 : 1;
+            if (na > nb) return dir === 'asc' ? 1 : -1;
+            return 0;
+        }
+
+        function getVisibleStocks() {
+            let data = allData || [];
+            if (currentIndustries.length) {
+                const set = new Set(currentIndustries);
+                data = data.filter(s => set.has(s.sector || ''));
+            }
+            if (currentSearch) {
+                const q = currentSearch;
+                data = data.filter(s =>
+                    (s.ticker || '').toLowerCase().includes(q) ||
+                    (s.name || '').toLowerCase().includes(q) ||
+                    (s.sector || '').toLowerCase().includes(q)
+                );
+            }
+            data = data.filter(passesRangeFilters);
+            if (showBuybackFeatures()) {
+                data = data.filter(passesBuybacksExchangeFilter);
+                data = data.filter(passesBuybacksUsIndexFilter);
+            }
+            if (currentSortCol) {
+                data = [...data].sort((a, b) => compareForSort(a, b, currentSortCol, currentSortDir));
+            }
+            return data;
+        }
+
+        function getUniqueIndustries(data) {
+            const set = new Set();
+            (data || []).forEach(s => { const sec = s && s.sector; if (sec) set.add(sec); });
+            return Array.from(set).sort();
+        }
+
+        function populateIndustryFilter(data) {
+            const list = document.getElementById('industry-filter-list');
+            if (!list) return;
+            const prev = new Set(currentIndustries);
+            const inds = getUniqueIndustries(data);
+            if (!inds.length) {
+                list.innerHTML = '<div class="text-[10px] text-slate-400 px-1">No industries</div>';
+                currentIndustries = [];
+                return;
+            }
+            list.innerHTML = inds.map(i => {
+                const esc = i.replace(/"/g, '&quot;');
+                const checked = prev.has(i) ? ' checked' : '';
+                return `<label class="industry-check"><input type="checkbox" value="${esc}"${checked} onchange="applyFilters()"><span>${escapeHtml(i)}</span></label>`;
+            }).join('');
+            currentIndustries = getSelectedIndustries();
+        }
+
+        function applyFilters() {
+            const searchIn = document.getElementById('search-filter');
+            currentIndustries = getSelectedIndustries();
+            currentSearch = searchIn ? (searchIn.value || '').toLowerCase().trim() : '';
+            syncFilterStateFromSliders();
+            renderTable();
+            renderKPIs(lastMeta);
+        }
+
+        function clearFilters() {
+            const searchIn = document.getElementById('search-filter');
+            if (searchIn) searchIn.value = '';
+            clearIndustryFilter();
+            clearBuybacksExchangeFilter();
+            clearBuybacksUsIndexFilter();
+            currentSearch = '';
+            initFilterSliders();
+            renderTable();
+            renderKPIs(lastMeta);
+        }
+
+        function setSort(col) {
+            if (currentSortCol === col) {
+                currentSortDir = (currentSortDir === 'asc') ? 'desc' : 'asc';
+            } else {
+                currentSortCol = col;
+                if (col === 'composite_score' || col === 'opportunity_rank' || col === 'quant_score') {
+                    currentSortDir = 'desc';
+                } else if (col === 'pct_from_52w_low' || col === 'pct_from_200w_ma') {
+                    currentSortDir = 'asc';
+                } else if (col === 'insider_buys_2026') {
+                    currentSortDir = 'desc';
+                } else {
+                    currentSortDir = 'asc';
+                }
+            }
+            renderTable();
+        }
+
+        function withDataLabel(visible) {
+            const pending = (visible || []).filter(x => x._pending_yf).length;
+            return pending ? `${visible.length - pending} loaded` : 'all cached';
+        }
+
+        function avgEdgarMetric(visible, field) {
+            const vals = (visible || []).map(s => getVal(s, field)).filter(v => v != null && !isNaN(v) && v !== 0);
+            if (!vals.length) return '—';
+            return (vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(1) + '%';
+        }
+
+        function renderKPIs(meta) {
+            if (meta && Object.keys(meta).length) lastMeta = meta;
+            const el = document.getElementById('kpi-row');
+            const visible = getVisibleStocks();
+            const isFull = isFullTableView();
+            const isBusiness = currentMarket === 'business';
+            const isBuybacks = isBuybacksList();
+            const showBuybackCols = showBuybackFeatures();
+            const totalSignals = visible.filter(x => (x.insider_buys_2026||0) > 0 || x.buyback_announced).length;
+            const totalInsider = visible.reduce((a,b) => a + (b.insider_buys_2026||0), 0);
+            const totalBuybacks = visible.filter(x => x.buyback_announced).length;
+            const avgGap = (visible.reduce((a,b)=>a+(b.pct_from_52w_low||0),0)/Math.max(1,visible.length)).toFixed(1);
+
+            if (isFull && isBuybacks) {
+                const withPct = visible.filter(x => (x.annual_buyback_pct || 0) > 0).length;
+                const avgPct = visible.filter(x => (x.annual_buyback_pct || 0) > 0)
+                    .reduce((a, b) => a + (b.annual_buyback_pct || 0), 0) / Math.max(withPct, 1);
+                el.innerHTML = `
+                    <div class="bg-white border rounded-3xl p-4">
+                        <div class="text-xs text-slate-500">COMPANIES</div>
+                        <div class="text-4xl font-bold">${visible.length}</div>
+                        <div class="text-[10px] text-slate-400">with buyback activity</div>
+                    </div>
+                    <div class="bg-white border rounded-3xl p-4">
+                        <div class="text-xs text-slate-500">WITH ANNUAL %</div>
+                        <div class="text-4xl font-bold text-teal-600">${withPct}</div>
+                        <div class="text-[10px]">TSE share-count data</div>
+                    </div>
+                    <div class="bg-white border rounded-3xl p-4">
+                        <div class="text-xs text-slate-500">AVG ANNUAL BUYBACK</div>
+                        <div class="text-4xl font-bold">${withPct ? avgPct.toFixed(2) + '%' : '—'}</div>
+                        <div class="text-[10px]">${(meta && meta.buyback_year) || lastMeta.buyback_year || new Date().getFullYear()} YTD</div>
+                    </div>
+                    <div class="bg-white border rounded-3xl p-4">
+                        <div class="text-xs text-slate-500">TSE CSV ROWS</div>
+                        <div class="text-4xl font-bold text-slate-600">${(meta && meta.tse_csv_rows) || lastMeta.tse_csv_rows || '—'}</div>
+                        <div class="text-[10px]">JPX repurchase history</div>
+                    </div>
+                `;
+            } else if (isFull && isBusiness) {
+                el.innerHTML = `
+                    <div class="bg-white border rounded-3xl p-4">
+                        <div class="text-xs text-slate-500">IN LIST</div>
+                        <div class="text-4xl font-bold">${visible.length}</div>
+                        <div class="text-[10px] text-slate-400">from CSV</div>
+                    </div>
+                    <div class="bg-white border rounded-3xl p-4">
+                        <div class="text-xs text-slate-500">YF CACHED</div>
+                        <div class="text-4xl font-bold text-teal-600">${(meta && meta.yf_cached_count) || lastMeta.yf_cached_count || '—'}</div>
+                        <div class="text-[10px]">symbols in cache</div>
+                    </div>
+                    <div class="bg-white border rounded-3xl p-4">
+                        <div class="text-xs text-slate-500">INACTIVE SKIPPED</div>
+                        <div class="text-4xl font-bold text-slate-600">${(meta && meta.inactive_count) || lastMeta.inactive_count || 0}</div>
+                        <div class="text-[10px]">no longer fetched</div>
+                    </div>
+                    <div class="bg-white border rounded-3xl p-4">
+                        <div class="text-xs text-slate-500">AVG GAP TO LOW</div>
+                        <div class="text-4xl font-bold text-emerald-600">${avgGap}%</div>
+                        <div class="text-[10px] mt-1 text-slate-400">${(meta && (meta.list_name || meta.data_source)) || lastMeta.list_name || ''}</div>
+                    </div>
+                `;
+            } else if (isFull) {
+                el.innerHTML = `
+                    <div class="bg-white border rounded-3xl p-4">
+                        <div class="text-xs text-slate-500">ASX LISTED</div>
+                        <div class="text-4xl font-bold">${visible.length}</div>
+                        <div class="text-[10px] text-slate-400">from CSV</div>
+                    </div>
+                    <div class="bg-white border rounded-3xl p-4">
+                        <div class="text-xs text-slate-500">WITH SIGNALS</div>
+                        <div class="text-4xl font-bold text-emerald-600">${totalSignals}</div>
+                        <div class="text-[10px]">insider or buyback</div>
+                    </div>
+                    <div class="bg-white border rounded-3xl p-4">
+                        <div class="text-xs text-slate-500">INSIDER / BUYBACK</div>
+                        <div class="text-3xl font-bold">${totalInsider} / ${totalBuybacks}</div>
+                    </div>
+                    <div class="bg-white border rounded-3xl p-4">
+                        <div class="text-xs text-slate-500">AVG GAP TO LOW</div>
+                        <div class="text-4xl font-bold text-emerald-600">${avgGap}%</div>
+                        <div class="text-[10px] mt-1 text-slate-400">${(meta && (meta.source || meta.data_source)) || (lastMeta.source || lastMeta.data_source) || ''}</div>
+                    </div>
+                `;
+            } else {
+                el.innerHTML = `
+                    <div class="bg-white border rounded-3xl p-4">
+                        <div class="text-xs text-slate-500">STOCKS (SIGNALS)</div>
+                        <div class="text-4xl font-bold">${visible.length}</div>
+                    </div>
+                    <div class="bg-white border rounded-3xl p-4">
+                        <div class="text-xs text-slate-500">INSIDER BUYS</div>
+                        <div class="text-4xl font-bold">${totalInsider}</div>
+                    </div>
+                    <div class="bg-white border rounded-3xl p-4">
+                        <div class="text-xs text-slate-500">BUYBACKS</div>
+                        <div class="text-4xl font-bold">${totalBuybacks}</div>
+                    </div>
+                    <div class="bg-white border rounded-3xl p-4">
+                        <div class="text-xs text-slate-500">AVG GAP</div>
+                        <div class="text-4xl font-bold text-emerald-600">${avgGap}%</div>
+                        <div class="text-[10px] mt-1 text-slate-400">${(meta && (meta.source || meta.data_source)) || (lastMeta.source || lastMeta.data_source) || ''}</div>
+                    </div>
+                `;
+            }
+        }
+
+        function renderTable(forMarket) {
+            const market = forMarket || currentMarket;
+            const body = document.getElementById('table-body');
+            const head = document.getElementById('table-head');
+            if (!body || !head) return;
+            body.innerHTML = '';
+
+            const isFull = isFullTableView(market);
+            const isBusiness = market === 'business';
+            const isBuybacks = isBuybacksList();
+            const showBuybackCols = showBuybackFeatures();
+            const visible = getVisibleStocks();
+
+            // Dynamic header (with data-col for sorting)
+            if (isFull) {
+                const buybackCols = showBuybackCols ? `
+                    <th data-col="buyback_source" class="text-left p-3">Source</th>
+                    <th data-col="buyback_date" class="text-left p-3">Latest Buyback</th>
+                    <th data-col="annual_buyback_pct" class="text-right p-3">Annual Buyback %</th>
+                    <th data-col="insider_buys_2026" class="text-center p-3">Insider Buys</th>
+                ` : '';
+                const signalCol = (isBusiness || isBuybacks) ? '' : '<th data-col="insider_buys_2026" class="text-center p-3">Signal</th>';
+                const usEdgarCols = showEdgarColumns() ? `
+                    <th data-col="roic_5y_avg" class="text-right p-3">ROIC 5Y</th>
+                    <th data-col="share_count_5y_change_pct" class="text-right p-3">Shares 5Y Δ</th>
+                    <th data-col="earnings_5y_growth_pct" class="text-right p-3">Earn 5Y Δ</th>
+                ` : '';
+                head.innerHTML = `
+                    <th data-col="opportunity_rank" class="text-center p-3">Rank</th>
+                    <th data-col="composite_score" class="text-right p-3">Score</th>
+                    <th data-col="coverage_tier" class="text-center p-3">Tier</th>
+                    <th data-col="ticker" class="text-left p-3">Ticker</th>
+                    <th data-col="name" class="text-left p-3">Company</th>
+                    <th data-col="sector" class="text-left">Sector</th>
+                    <th data-col="current_price" class="text-right">Price</th>
+                    <th data-col="market_cap" class="text-right">Mkt Cap</th>
+                    <th data-col="pct_from_52w_low" class="text-right">52w Gap</th>
+                    <th data-col="pct_from_200w_ma" class="text-right">200w MA Gap</th>
+                    <th data-col="pe" class="text-right">P/E</th>
+                    <th data-col="pb" class="text-right">P/B</th>
+                    <th data-col="insider_ownership_pct" class="text-right">Insider %</th>
+                    <th data-col="p_fcf" class="text-right">P/FCF</th>
+                    <th data-col="debt_to_equity" class="text-right">D/E</th>
+                    <th data-col="net_cash_m" class="text-right p-3">Net Cash</th>
+                    <th data-col="net_cash_pct_mcap" class="text-right p-3">Net Cash %</th>
+                    <th data-col="net_assets_vs_mcap_m" class="text-right p-3" title="Shareholders' equity minus market cap">NA − MCap</th>
+                    ${buybackCols}
+                    ${usEdgarCols}
+                    ${signalCol}
+                `;
+            } else {
+                const usEdgarCols = market === 'us' ? `
+                    <th data-col="roic_5y_avg" class="text-right p-4">ROIC 5Y Avg</th>
+                    <th data-col="share_count_5y_change_pct" class="text-right p-4">Shares 5Y Δ</th>
+                ` : '';
+                head.innerHTML = `
+                    <th data-col="opportunity_rank" class="text-center p-4">Rank</th>
+                    <th data-col="composite_score" class="text-right p-4">Score</th>
+                    <th data-col="coverage_tier" class="text-center p-4">Tier</th>
+                    <th data-col="ticker" class="text-left p-4">Ticker</th>
+                    <th data-col="name" class="text-left p-4">Company</th>
+                    <th data-col="current_price" class="text-right p-4">Price</th>
+                    <th data-col="market_cap" class="text-right p-4">Mkt Cap</th>
+                    <th data-col="insider_buys_2026" class="text-center p-4">Insider Buys</th>
+                    <th data-col="buyback_announced" class="text-center p-4">Buyback</th>
+                    ${usEdgarCols}
+                    <th data-col="pct_from_52w_low" class="text-right p-4">52w Gap</th>
+                    <th data-col="pct_from_200w_ma" class="text-right p-4">200w MA Gap</th>
+                    <th data-col="net_cash_m" class="text-right p-4">Net Cash</th>
+                `;
+            }
+
+            // Make headers sortable + show active sort arrow (use onclick attr to avoid accumulating listeners on re-renders)
+            head.querySelectorAll('th[data-col]').forEach(th => {
+                const col = th.getAttribute('data-col');
+                th.classList.add('cursor-pointer', 'select-none', 'hover:bg-slate-200');
+                th.title = 'Click to sort';
+                th.setAttribute('onclick', 'setSort(this.getAttribute(\"data-col\"))');
+                if (col === currentSortCol) {
+                    th.innerHTML = th.innerHTML + (currentSortDir === 'asc' ? ' ▲' : ' ▼');
+                }
+            });
+
+            visible.forEach(stock => {
+                const tr = document.createElement('tr');
+                tr.className = 'hover:bg-slate-50 cursor-pointer';
+                const hasSignal = (stock.insider_buys_2026 || 0) > 0 || stock.buyback_announced;
+                const gap = (stock.pct_from_52w_low || 0).toFixed(1);
+                const maGapVal = getVal(stock, 'pct_from_200w_ma');
+                const maGap = maGapVal ? maGapVal.toFixed(1) : '—';
+                const maGapClass = maGapVal ? gapColorClass(maGapVal) : '';
+                const mcapStr = formatMarketCap(getVal(stock, 'market_cap'), stock);
+                const priceStr = stock.current_price ? formatPrice(stock.current_price, stock) : '—';
+                const netCashM = getVal(stock, 'net_cash_m');
+                const netCashStr = formatNetCash(netCashM, stock);
+                const netCashClass = netCashColorClass(netCashM);
+                const netCashPct = getVal(stock, 'net_cash_pct_mcap');
+                const netCashPctStr = formatNetCashPct(netCashPct);
+                const netCashPctClass = netCashPctColorClass(netCashPct);
+                const naVsMcapM = getVal(stock, 'net_assets_vs_mcap_m');
+                const naVsMcapStr = formatNetCash(naVsMcapM, stock);
+                const naVsMcapClass = assetsVsMcapColorClass(getVal(stock, 'net_assets_vs_mcap_pct'));
+
+                if (isFull) {
+                    const peRaw = getVal(stock, 'pe');
+                    const pbRaw = getVal(stock, 'pb');
+                    const pe = peRaw ? peRaw.toFixed(1) : '—';
+                    const pb = pbRaw ? pbRaw.toFixed(2) : '—';
+                    const pfcf = (stock.p_fcf || stock.metrics?.p_fcf || 0);
+                    const pfcfStr = pfcf ? pfcf.toFixed(1) : '—';
+                    const de = (stock.metrics?.debt_to_equity || stock.debt_to_equity || 0);
+                    const deStr = (typeof de === 'number' && de > 0) ? de.toFixed(2) : '—';
+                    const sigBadge = hasSignal 
+                        ? `<span class="inline-block text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700">${(stock.insider_buys_2026||0) > 0 ? 'insider' : ''}${(stock.insider_buys_2026||0)>0 && stock.buyback_announced ? '+' : ''}${stock.buyback_announced ? 'buyback' : ''}</span>`
+                        : '<span class="text-slate-400">—</span>';
+                    const roic5y = getVal(stock, 'roic_5y_avg');
+                    const shareChg = getVal(stock, 'share_count_5y_change_pct');
+                    const earn5y = getVal(stock, 'earnings_5y_growth_pct');
+                    const usEdgarCells = showEdgarColumns() ? `
+                        <td class="p-3 text-right text-slate-600">${showEdgarForStock(stock) && roic5y ? roic5y.toFixed(1) + '%' : '—'}</td>
+                        <td class="p-3 text-right font-medium ${shareChangeColorClass(shareChg)}">${showEdgarForStock(stock) ? formatPctChange(shareChg) : '—'}</td>
+                        <td class="p-3 text-right font-medium ${shareChangeColorClass(earn5y)}">${showEdgarForStock(stock) ? formatPctChange(earn5y) : '—'}</td>
+                    ` : '';
+                    const buybackCells = showBuybackCols ? `
+                        <td class="p-3 text-xs text-slate-600">${stock.buyback_source || '—'}</td>
+                        <td class="p-3 text-xs">${stock.buyback_date || '—'}</td>
+                        <td class="p-3 text-right font-semibold text-teal-700">${formatBuybackPct(stock.annual_buyback_pct)}</td>
+                        <td class="p-3 text-center font-medium ${(stock.insider_buys_2026 || 0) > 0 ? 'text-emerald-700' : 'text-slate-400'}">${stock.insider_buys_2026 || 0}</td>
+                    ` : '';
+                    const signalCell = (isBusiness || isBuybacks) ? '' : `<td class="p-3 text-center">${sigBadge}</td>`;
+                    const pendingClass = stock._pending_yf ? ' opacity-60' : '';
+                    const oppRank = stock.opportunity_rank != null ? stock.opportunity_rank : '—';
+                    const composite = stock.composite_score != null ? stock.composite_score.toFixed(1) : '—';
+                    const tier = stock.coverage_tier || '—';
+                    const tierClass = tier === 'A' ? 'bg-violet-100 text-violet-800' : tier === 'B' ? 'bg-sky-100 text-sky-800' : tier === 'C' ? 'bg-slate-100 text-slate-600' : '';
+                    const wikiLink = wikiVaultLink(stock);
+                    tr.innerHTML = `
+                        <td class="p-3 text-center text-xs font-bold text-slate-500">${oppRank}</td>
+                        <td class="p-3 text-right font-semibold text-teal-700">${composite}</td>
+                        <td class="p-3 text-center"><span class="text-[10px] px-1.5 py-0.5 rounded ${tierClass}">${tier}</span>${wikiLink}</td>
+                        <td class="p-3 font-semibold${pendingClass}">${stock.ticker}</td>
+                        <td class="col-company${pendingClass}">${stock.name}${stock._pending_yf ? ' <span class="text-[9px] text-amber-600">pending</span>' : ''}</td>
+                        <td class="text-xs text-slate-500">${stock.sector || ''}</td>
+                        <td class="text-right font-medium">${priceStr}</td>
+                        <td class="text-right text-slate-600">${mcapStr}</td>
+                        <td class="text-right font-semibold ${gap < 5 && stock.current_price ? 'text-emerald-600' : ''}">${stock.current_price ? gap + '%' : '—'}</td>
+                        <td class="text-right font-semibold ${maGapClass}">${maGap}${maGapVal ? '%' : ''}</td>
+                        <td class="text-right">${pe !== '—' && peRaw ? pe : '—'}</td>
+                        <td class="text-right">${pb !== '—' && pbRaw ? pb : '—'}</td>
+                        <td class="text-right text-slate-600">${formatInsiderOwnership(stock)}</td>
+                        <td class="text-right">${pfcfStr}</td>
+                        <td class="text-right text-slate-600">${deStr}</td>
+                        <td class="p-3 text-right font-medium ${netCashClass}">${netCashStr}</td>
+                        <td class="p-3 text-right font-medium ${netCashPctClass}">${netCashPctStr}</td>
+                        <td class="p-3 text-right font-medium ${naVsMcapClass}">${naVsMcapStr}</td>
+                        ${buybackCells}
+                        ${usEdgarCells}
+                        ${signalCell}
+                    `;
+                } else {
+                    const roic5y = getVal(stock, 'roic_5y_avg');
+                    const shareChg = getVal(stock, 'share_count_5y_change_pct');
+                    const usEdgarCells = currentMarket === 'us' ? `
+                        <td class="p-4 text-right text-slate-600">${roic5y ? roic5y.toFixed(1) + '%' : '—'}</td>
+                        <td class="p-4 text-right font-medium ${shareChangeColorClass(shareChg)}">${formatPctChange(shareChg)}</td>
+                    ` : '';
+                    const oppRank = stock.opportunity_rank != null ? stock.opportunity_rank : '—';
+                    const composite = stock.composite_score != null ? stock.composite_score.toFixed(1) : '—';
+                    const tier = stock.coverage_tier || '—';
+                    const tierClass = tier === 'A' ? 'bg-violet-100 text-violet-800' : tier === 'B' ? 'bg-sky-100 text-sky-800' : tier === 'C' ? 'bg-slate-100 text-slate-600' : '';
+                    const wikiLink = wikiVaultLink(stock);
+                    tr.innerHTML = `
+                        <td class="p-4 text-center text-xs font-bold text-slate-500">${oppRank}</td>
+                        <td class="p-4 text-right font-semibold text-teal-700">${composite}</td>
+                        <td class="p-4 text-center"><span class="text-[10px] px-1.5 py-0.5 rounded ${tierClass}">${tier}</span>${wikiLink}</td>
+                        <td class="p-4 font-semibold">${stock.ticker}</td>
+                        <td class="p-4">${stock.name}</td>
+                        <td class="p-4 text-right font-medium">${priceStr}</td>
+                        <td class="p-4 text-right text-slate-600">${mcapStr}</td>
+                        <td class="p-4 text-center font-medium">${stock.insider_buys_2026 || 0}</td>
+                        <td class="p-4 text-center">${stock.buyback_announced ? 'Yes' : '—'}</td>
+                        ${usEdgarCells}
+                        <td class="p-4 text-right font-medium ${gap < 5 ? 'text-emerald-600' : ''}">${gap}%</td>
+                        <td class="p-4 text-right font-medium ${maGapClass}">${maGap}${maGapVal ? '%' : ''}</td>
+                        <td class="p-4 text-right font-medium ${netCashClass}">${netCashStr}</td>
+                    `;
+                }
+                tr.onclick = () => showModal(stock);  // will fetch fresh detail for rich + up-to-date figures
+                body.appendChild(tr);
+            });
+            const total = allData.length;
+            const shown = visible.length;
+            document.getElementById('count').textContent = (shown === total) ? `${total} stocks shown` : `${shown}/${total} stocks shown`;
+        }
+
+        function showModal(initial) {
+            // Always use the active tab for API routing (ignore stale row._market from old renders)
+            let ticker = '';
+            const market = currentMarket;
+            if (initial) {
+                if (typeof initial === 'string') {
+                    ticker = initial;
+                } else {
+                    ticker = initial.ticker || '';
+                }
+            }
+            if (!ticker) return;
+
+            const modalId = 'detail-modal-' + Date.now();
+            const apiTicker = (market === 'business') ? ticker : ticker.replace('.AX', '');
+            const listParam = (market === 'business' && currentBusinessList)
+                ? `&list=${encodeURIComponent(currentBusinessList)}` : '';
+
+            // Show loading shell immediately
+            const shell = document.createElement('div');
+            shell.id = modalId;
+            shell.className = 'fixed inset-0 bg-black/60 flex items-center justify-center z-50';
+            shell.innerHTML = `
+                <div onclick="event.stopImmediatePropagation()" class="bg-white rounded-3xl p-6 max-w-3xl w-full m-4 max-h-[92vh] overflow-auto">
+                    <div class="flex items-center justify-between mb-4">
+                        <div>
+                            <span class="text-2xl font-bold">${ticker}</span>
+                            <span class="ml-2 text-xs px-2 py-0.5 bg-slate-200 rounded">${market.toUpperCase()}</span>
+                        </div>
+                        <button onclick="document.getElementById('${modalId}').remove()" class="text-3xl leading-none text-slate-400 hover:text-slate-600">×</button>
+                    </div>
+                    <div class="py-8 text-center text-slate-500">
+                        <i class="fa-solid fa-spinner fa-spin mr-2"></i> Fetching fresh data for ${ticker}...
+                    </div>
+                </div>`;
+            document.body.appendChild(shell);
+
+            // Fetch fresh (this is what makes "figures refreshed when user clicks")
+            fetch(`/api/stock/${encodeURIComponent(apiTicker)}?market=${market}${listParam}`)
+                .then(r => r.json())
+                .then(data => {
+                    if (data && data.error) {
+                        shell.innerHTML = `
+                            <div onclick="event.stopImmediatePropagation()" class="bg-white rounded-3xl p-6 max-w-md w-full m-4">
+                                <div class="flex justify-between"><span class="font-bold">Error</span><button onclick="this.closest('.fixed').remove()">×</button></div>
+                                <div class="mt-2 text-red-600">${data.error}</div>
+                            </div>`;
+                        shell.onclick = () => shell.remove();
+                        return;
+                    }
+                    shell.innerHTML = buildRichDetailHtml(data, modalId);
+                    initModalPriceChart(modalId, data.price_trend || [], data.buyback_repurchases || [], data.insider_purchases || []);
+                    shell.onclick = (ev) => { if (ev.target === shell) shell.remove(); };
+                })
+                .catch(err => {
+                    shell.innerHTML = `
+                        <div onclick="event.stopImmediatePropagation()" class="bg-white rounded-3xl p-6 max-w-md w-full m-4">
+                            <div>Failed to load detail: ${err}</div>
+                            <button onclick="this.closest('.fixed').remove()" class="mt-2 px-3 py-1 text-sm border rounded">Close</button>
+                        </div>`;
+                    shell.onclick = () => shell.remove();
+                });
+        }
+
+        function nearestTrendIndex(labels, dateStr) {
+            if (!labels.length || !dateStr) return 0;
+            const target = new Date(dateStr + 'T12:00:00').getTime();
+            let best = 0;
+            let bestDiff = Infinity;
+            labels.forEach((d, i) => {
+                const diff = Math.abs(new Date(d + 'T12:00:00').getTime() - target);
+                if (diff < bestDiff) { bestDiff = diff; best = i; }
+            });
+            return best;
+        }
+
+        function repurchaseBubbleRadius(shares) {
+            const s = Number(shares) || 0;
+            if (s <= 0) return 4;
+            return Math.min(18, Math.max(5, Math.sqrt(s / 40000)));
+        }
+
+        function initModalPriceChart(modalId, trend, buybacks, insiders) {
+            const canvas = document.querySelector(`#${modalId} canvas[data-price-chart]`);
+            if (!canvas || !trend || trend.length < 2 || typeof Chart === 'undefined') return;
+            if (canvas._chartInstance) {
+                canvas._chartInstance.destroy();
+            }
+            const labels = trend.map(p => p.date);
+            const values = trend.map(p => p.close);
+            const mapEventPoints = (events, kind) => (events || [])
+                .filter(b => b && b.date)
+                .map(b => {
+                    const idx = nearestTrendIndex(labels, b.date);
+                    const priceKnown = Number(b.price) > 0;
+                    const eventPrice = priceKnown ? Number(b.price) : 0;
+                    const y = priceKnown ? eventPrice : values[idx];
+                    return {
+                        x: labels[idx],
+                        y,
+                        shares: Number(b.shares) || 0,
+                        eventDate: b.date,
+                        eventPrice,
+                        priceKnown,
+                        source: b.source || '',
+                        director: b.director || '',
+                        currency: b.currency || '',
+                        kind,
+                    };
+                });
+            const repurchasePoints = mapEventPoints(buybacks, 'repurchase');
+            const insiderPoints = mapEventPoints(insiders, 'insider');
+
+            const datasets = [{
+                type: 'line',
+                label: 'Close',
+                data: values,
+                borderColor: '#115e59',
+                backgroundColor: 'rgba(17, 94, 89, 0.08)',
+                fill: true,
+                tension: 0.15,
+                pointRadius: 0,
+                pointHoverRadius: 4,
+                borderWidth: 2,
+                order: 3,
+            }];
+
+            if (repurchasePoints.length) {
+                datasets.push({
+                    type: 'scatter',
+                    label: 'Share repurchases',
+                    data: repurchasePoints,
+                    backgroundColor: 'rgba(217, 119, 6, 0.82)',
+                    borderColor: '#b45309',
+                    borderWidth: 1,
+                    pointStyle: 'circle',
+                    pointRadius: (ctx) => repurchaseBubbleRadius(ctx.raw?.shares),
+                    pointHoverRadius: (ctx) => repurchaseBubbleRadius(ctx.raw?.shares) + 3,
+                    order: 1,
+                });
+            }
+
+            if (insiderPoints.length) {
+                datasets.push({
+                    type: 'scatter',
+                    label: 'Insider purchases',
+                    data: insiderPoints,
+                    backgroundColor: 'rgba(16, 185, 129, 0.82)',
+                    borderColor: '#047857',
+                    borderWidth: 1,
+                    pointStyle: 'circle',
+                    pointRadius: (ctx) => repurchaseBubbleRadius(ctx.raw?.shares),
+                    pointHoverRadius: (ctx) => repurchaseBubbleRadius(ctx.raw?.shares) + 3,
+                    order: 2,
+                });
+            }
+
+            const hasMarkers = repurchasePoints.length > 0 || insiderPoints.length > 0;
+
+            canvas._chartInstance = new Chart(canvas, {
+                type: 'line',
+                data: { labels, datasets },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { mode: 'nearest', intersect: false },
+                    plugins: {
+                        legend: {
+                            display: hasMarkers,
+                            labels: { boxWidth: 10, font: { size: 10 } },
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: (ctx) => {
+                                    const raw = ctx.raw || {};
+                                    if (ctx.dataset.type === 'scatter') {
+                                        const price = raw.priceKnown ? raw.eventPrice : 0;
+                                        const priceStr = raw.priceKnown ? price.toFixed(2) : '0.00';
+                                        const shares = raw.shares > 0 ? raw.shares.toLocaleString() : '—';
+                                        const src = raw.source ? ` (${raw.source})` : '';
+                                        const cur = raw.currency ? ` ${raw.currency}` : '';
+                                        if (raw.kind === 'insider' || ctx.dataset.label === 'Insider purchases') {
+                                            const who = raw.director ? ` • ${raw.director}` : '';
+                                            return [
+                                                `Insider buy: ${shares} shares`,
+                                                `Price: ${priceStr}${cur}${src}${who}`,
+                                                `Date: ${raw.eventDate || raw.x || '—'}`,
+                                            ];
+                                        }
+                                        return [
+                                            `Repurchase: ${shares} shares`,
+                                            `Price: ${priceStr}${src}`,
+                                            `Date: ${raw.eventDate || raw.x || '—'}`,
+                                        ];
+                                    }
+                                    return 'Close: ' + (ctx.parsed.y != null ? ctx.parsed.y.toFixed(2) : '—');
+                                },
+                            },
+                        },
+                    },
+                    scales: {
+                        x: {
+                            ticks: { maxTicksLimit: 8, font: { size: 10 } },
+                            grid: { display: false },
+                        },
+                        y: {
+                            ticks: {
+                                font: { size: 10 },
+                                callback: (v) => (v != null ? Number(v).toFixed(0) : v),
+                            },
+                        },
+                    },
+                },
+            });
+        }
+
+        function orderEarningsHistory(earnings) {
+            if (!earnings || !earnings.length) return [];
+            const quarterly = earnings.filter(e => e.type === 'quarterly');
+            const annual = earnings.filter(e => e.type === 'annual');
+            const other = earnings.filter(e => e.type !== 'quarterly' && e.type !== 'annual');
+            const byPeriodDesc = (a, b) => String(b.period || '').localeCompare(String(a.period || ''));
+            quarterly.sort(byPeriodDesc);
+            annual.sort(byPeriodDesc);
+            return [...quarterly, ...annual, ...other];
+        }
+
+        function buildRichDetailHtml(stock, modalId) {
+            const m = stock.metrics || {};
+            const trend = stock.price_trend || [];
+            const earnings = orderEarningsHistory(stock.earnings_history || []);
+            const sigs = stock.signals || [];
+
+            const repurchaseCount = (stock.buyback_repurchases || []).length;
+            const insiderCount = (stock.insider_purchases || []).length;
+            let markerNote = '';
+            if (repurchaseCount) markerNote += ` • orange = repurchases (${repurchaseCount})`;
+            if (insiderCount) markerNote += ` • green = insider buys (${insiderCount})`;
+            if (markerNote) markerNote += ' • large dots ∝ volume; small dots = date only';
+            const priceChart = trend.length >= 2
+                ? `<div class="text-xs font-medium text-slate-600 mb-2">2-Year Price Trend (weekly closes)</div>
+                   <div class="relative h-56 w-full"><canvas data-price-chart></canvas></div>
+                   <div class="text-[10px] text-slate-400 mt-1">Hover for price • ${trend[0].date} to ${trend[trend.length - 1].date}${markerNote}</div>`
+                : '<div class="text-xs text-slate-400">No 2-year price history available.</div>';
+
+            let earningsViz = '<div class="text-xs text-slate-400">No earnings history available.</div>';
+            if (earnings.length > 0) {
+                const maxAbs = Math.max(1, ...earnings.map(e => Math.abs(e.eps || 0)));
+                const bars = earnings.slice(0, 12).map(e => {
+                    const h = Math.round(Math.abs(e.eps || 0) / maxAbs * 100);
+                    const color = (e.eps || 0) >= 0 ? 'bg-emerald-600' : 'bg-rose-600';
+                    return `<div class="flex flex-col items-center flex-1 min-w-0">
+                        <div class="w-full bg-slate-100 rounded-t flex items-end" style="height:64px">
+                            <div class="${color} w-full rounded-t transition-all" style="height:${h}%"></div>
+                        </div>
+                        <div class="text-[9px] text-center mt-1 leading-none">
+                            <div class="font-mono text-[10px]">${(e.eps||0).toFixed(2)}</div>
+                            <div class="text-slate-400">${e.period}</div>
+                        </div>
+                    </div>`;
+                }).join('');
+                const rows = earnings.slice(0, 12).map(e => `
+                    <tr class="border-t">
+                        <td class="py-0.5 pr-2 text-xs">${e.period} ${e.type==='quarterly'?'Q':''}</td>
+                        <td class="py-0.5 font-mono text-right text-xs ${(e.eps||0)>=0 ? 'text-emerald-700':'text-rose-700'}">${(e.eps||0).toFixed(2)}</td>
+                    </tr>`).join('');
+                earningsViz = `
+                    <div class="text-[10px] text-slate-500 mb-4">EPS values (recent quarters, then annual)</div>
+                    <div class="flex gap-1 items-end h-[72px] mb-4 px-1">${bars}</div>
+                    <table class="text-xs w-full"><tbody>${rows}</tbody></table>`;
+            }
+
+            const summaryHtml = stock.summary
+                ? `<div class="mt-4 border-t pt-3">
+                       <div class="text-xs font-medium text-slate-700 mb-2">Company Summary</div>
+                       <p class="text-sm text-slate-600 leading-relaxed">${escapeHtml(stock.summary)}</p>
+                   </div>`
+                : '';
+
+            const de = m.debt_to_equity || stock.debt_to_equity || 0;
+            const deStr = (typeof de === 'number' && de > 0) ? de.toFixed(2) : '—';
+
+            const mcapDetail = formatMarketCap(m.market_cap || stock.market_cap, stock);
+            const curLabel = getStockCurrency(stock);
+            const netCashPctDetail = getVal(stock, 'net_cash_pct_mcap');
+            const netAssetsM = getVal(stock, 'net_assets_m');
+            const naVsMcapDetail = getVal(stock, 'net_assets_vs_mcap_m');
+            const naVsMcapPctDetail = getVal(stock, 'net_assets_vs_mcap_pct');
+            const maGapDetail = (m.pct_from_200w_ma || stock.pct_from_200w_ma || 0);
+            const ma200 = (m.ma_200w || stock.metrics?.ma_200w || 0);
+
+            const edgar = stock.edgar || {};
+            const roicLatest = getVal(stock, 'roic_latest');
+            const roic5y = getVal(stock, 'roic_5y_avg');
+            const shareChg5y = getVal(stock, 'share_count_5y_change_pct');
+            const earnYoyDetail = getVal(stock, 'earnings_yoy_pct');
+            const earn5yDetail = getVal(stock, 'earnings_5y_growth_pct');
+            const edgarSummary = showEdgarForStock(stock) ? `
+                    <div>ROIC (latest FY): <span class="font-semibold">${roicLatest ? roicLatest.toFixed(1) + '%' : '—'}</span></div>
+                    <div>ROIC (5Y avg): <span class="font-semibold">${roic5y ? roic5y.toFixed(1) + '%' : '—'}</span></div>
+                    <div>Shares 5Y Δ: <span class="font-semibold ${shareChangeColorClass(shareChg5y)}">${formatPctChange(shareChg5y)}</span>${edgar.share_count_baseline_year ? ` <span class="text-xs text-slate-400">(${edgar.share_count_baseline_year}→${edgar.share_count_latest_year || 'now'})</span>` : ''}</div>
+                    <div>Earnings YoY: <span class="font-semibold ${shareChangeColorClass(earnYoyDetail)}">${formatPctChange(earnYoyDetail)}</span></div>
+                    <div>Earnings 5Y Δ: <span class="font-semibold ${shareChangeColorClass(earn5yDetail)}">${formatPctChange(earn5yDetail)}</span></div>
+            ` : '';
+
+            const buybackDetail = (stock.annual_buyback_pct || stock.buyback_date || (stock.buyback_quarterly || []).length) ? `
+                    <div>Latest buyback: <span class="font-semibold">${stock.buyback_date || '—'}</span></div>
+                    <div>Annual buyback %: <span class="font-semibold text-teal-700">${formatBuybackPct(stock.annual_buyback_pct)}</span></div>
+                    ${stock.buyback_source ? `<div>Buyback source: <span class="font-semibold">${stock.buyback_source}</span></div>` : ''}
+            ` : '';
+
+            let quarterlyBuybackHtml = '';
+            const qBuybacks = stock.buyback_quarterly || [];
+            if (qBuybacks.length) {
+                const qRows = qBuybacks.map(q => {
+                    const periodRows = (q.periods || []).map(p => `
+                        <tr class="border-t text-slate-500">
+                            <td class="py-0.5 pr-2 pl-3 text-[10px]">${escapeHtml(p.period_label || p.period_end || '')}</td>
+                            <td class="py-0.5 font-mono text-right text-[10px]">${formatSharesCount(p.shares)}</td>
+                            <td class="py-0.5 font-mono text-right text-[10px]">${p.price ? formatPrice(p.price, stock) : '—'}</td>
+                        </tr>`).join('');
+                    return `
+                        <tr class="border-t">
+                            <td class="py-1 pr-2 text-xs font-medium">${escapeHtml(q.quarter || '')}</td>
+                            <td class="py-1 font-mono text-right text-xs font-semibold">${formatSharesCount(q.shares)}</td>
+                            <td class="py-1 font-mono text-right text-xs">${q.avg_price ? formatPrice(q.avg_price, stock) : '—'}</td>
+                            <td class="py-1 font-mono text-right text-xs text-teal-700">${q.pct_of_outstanding != null ? q.pct_of_outstanding.toFixed(2) + '%' : '—'}</td>
+                        </tr>
+                        ${periodRows}`;
+                }).join('');
+                quarterlyBuybackHtml = `
+                    <div class="mt-6 border-t pt-4">
+                        <div class="text-xs font-medium text-slate-600 mb-1">Quarterly Share Repurchases</div>
+                        <div class="text-[10px] text-slate-400 mb-2">US: SEC 10-Q monthly periods rolled up by calendar quarter. HK/TSE: daily repurchases by quarter.</div>
+                        <table class="text-xs w-full">
+                            <thead>
+                                <tr class="text-slate-500">
+                                    <th class="text-left pb-1">Quarter</th>
+                                    <th class="text-right pb-1">Shares</th>
+                                    <th class="text-right pb-1">Avg $</th>
+                                    <th class="text-right pb-1">% of SO</th>
+                                </tr>
+                            </thead>
+                            <tbody>${qRows}</tbody>
+                        </table>
+                    </div>`;
+            }
+
+            const metricsHtml = `
+                <div class="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-1 text-sm border-t pt-3">
+                    ${buybackDetail}
+                    <div>Price: <span class="font-semibold">${stock.current_price ? formatPrice(stock.current_price, stock) : '—'}</span> <span class="text-xs text-slate-400">${curLabel}</span></div>
+                    <div>Market Cap: <span class="font-semibold">${mcapDetail}</span></div>
+                    <div>Gap to 52w Low: <span class="font-semibold">${(stock.pct_from_52w_low || 0).toFixed(1)}%</span></div>
+                    <div>Gap to 200w MA: <span class="font-semibold ${gapColorClass(maGapDetail)}">${maGapDetail ? maGapDetail.toFixed(1) + '%' : '—'}</span>${ma200 ? ` <span class="text-xs text-slate-400">(MA $${ma200.toFixed(2)})</span>` : ''}</div>
+                    <div>52w Range: <span class="font-semibold">${formatPrice(stock.low_52w, stock)} — ${formatPrice(stock.high_52w, stock)}</span></div>
+
+                    <div>P/E (trailing): <span class="font-semibold">${m.pe || stock.pe || '—'}</span></div>
+                    <div>Forward P/E: <span class="font-semibold">${m.forward_pe || '—'}</span></div>
+                    <div>P/B: <span class="font-semibold">${m.pb || stock.pb || '—'}</span></div>
+
+                    <div>P/FCF: <span class="font-semibold">${m.p_fcf || stock.p_fcf || '—'}</span></div>
+                    <div>D/E (debt/equity): <span class="font-semibold">${deStr}</span></div>
+                    <div>EV/EBITDA: <span class="font-semibold">${m.ev_ebitda || '—'}</span></div>
+
+                    <div>ROE: <span class="font-semibold">${m.roe || '—'}%</span></div>
+                    <div>Insider Ownership: <span class="font-semibold">${formatInsiderOwnership(stock)}</span></div>
+                    <div>Div Yield: <span class="font-semibold">${formatDivYield(m.div_yield)}</span></div>
+                    <div>Net Cash: <span class="font-semibold ${netCashColorClass(m.net_cash_m)}">${formatNetCash(m.net_cash_m, stock)}</span></div>
+                    <div>Net Cash / Mkt Cap: <span class="font-semibold ${netCashPctColorClass(netCashPctDetail)}">${formatNetCashPct(netCashPctDetail)}</span></div>
+                    <div>Net Assets (equity): <span class="font-semibold">${formatNetCash(netAssetsM ?? m.net_assets_m, stock)}</span></div>
+                    <div>Net Assets − Mkt Cap: <span class="font-semibold ${assetsVsMcapColorClass(naVsMcapPctDetail)}">${formatNetCash(naVsMcapDetail ?? m.net_assets_vs_mcap_m, stock)} <span class="text-xs">(${formatAssetsVsMcapPct(naVsMcapPctDetail ?? m.net_assets_vs_mcap_pct)})</span></span></div>
+                    ${edgarSummary}
+                </div>`;
+
+            let edgarHistoryHtml = '';
+            if (showEdgarForStock(stock)) {
+                const shareHist = edgar.share_count_history || [];
+                const roicHist = edgar.roic_history || [];
+                if (shareHist.length) {
+                    const shareRows = [...shareHist].reverse().map(h => `
+                        <tr class="border-t">
+                            <td class="py-0.5 pr-2 text-xs">${h.year}</td>
+                            <td class="py-0.5 font-mono text-right text-xs">${formatSharesCount(h.shares)}</td>
+                            <td class="py-0.5 font-mono text-right text-xs ${shareChangeColorClass(h.yoy_pct)}">${h.yoy_pct != null ? formatPctChange(h.yoy_pct, 2) : '—'}</td>
+                        </tr>`).join('');
+                    edgarHistoryHtml += `
+                        <div class="mt-6 border-t pt-4">
+                            <div class="text-xs font-medium text-slate-600 mb-2">Diluted Share Count History (SEC 10-K)</div>
+                            <table class="text-xs w-full">
+                                <thead><tr class="text-slate-500"><th class="text-left pb-1">FY</th><th class="text-right pb-1">Shares</th><th class="text-right pb-1">YoY %</th></tr></thead>
+                                <tbody>${shareRows}</tbody>
+                            </table>
+                        </div>`;
+                }
+                if (roicHist.length) {
+                    const roicRows = [...roicHist].reverse().map(h => `
+                        <tr class="border-t">
+                            <td class="py-0.5 pr-2 text-xs">${h.year}</td>
+                            <td class="py-0.5 font-mono text-right text-xs font-medium">${h.roic != null ? h.roic.toFixed(1) + '%' : '—'}</td>
+                        </tr>`).join('');
+                    edgarHistoryHtml += `
+                        <div class="mt-6 border-t pt-4">
+                            <div class="text-xs font-medium text-slate-600 mb-2">Annual ROIC History (SEC 10-K)</div>
+                            <table class="text-xs w-full">
+                                <thead><tr class="text-slate-500"><th class="text-left pb-1">FY</th><th class="text-right pb-1">ROIC</th></tr></thead>
+                                <tbody>${roicRows}</tbody>
+                            </table>
+                        </div>`;
+                }
+                const earnHist = edgar.earnings_history || [];
+                if (earnHist.length) {
+                    const earnRows = [...earnHist].reverse().map(h => `
+                        <tr class="border-t">
+                            <td class="py-0.5 pr-2 text-xs">${h.year}</td>
+                            <td class="py-0.5 font-mono text-right text-xs">${formatEdgarEarnings(h.earnings)}</td>
+                            <td class="py-0.5 font-mono text-right text-xs ${shareChangeColorClass(h.yoy_pct)}">${h.yoy_pct != null ? formatPctChange(h.yoy_pct, 2) : '—'}</td>
+                        </tr>`).join('');
+                    edgarHistoryHtml += `
+                        <div class="mt-6 border-t pt-4">
+                            <div class="text-xs font-medium text-slate-600 mb-2">Net Income History (SEC 10-K)</div>
+                            <table class="text-xs w-full">
+                                <thead><tr class="text-slate-500"><th class="text-left pb-1">FY</th><th class="text-right pb-1">Net Income</th><th class="text-right pb-1">YoY %</th></tr></thead>
+                                <tbody>${earnRows}</tbody>
+                            </table>
+                        </div>`;
+                }
+            }
+
+            const signalsHtml = sigs.length ? `
+                <div class="mt-3">
+                    <div class="text-xs font-medium text-slate-600 mb-1">Recent Signals</div>
+                    <ul class="text-xs space-y-0.5">
+                        ${sigs.slice(0,5).map(s => `<li class="flex gap-2"><span class="font-mono text-slate-400 w-16">${s.date}</span> <span class="font-medium ${s.type==='insider'?'text-emerald-700':'text-amber-700'}">${s.type}</span> <span class="text-slate-600 truncate">${(s.desc||s.headline||'').slice(0,90)}</span></li>`).join('')}
+                    </ul>
+                </div>` : '';
+
+            return `
+                <div onclick="event.stopImmediatePropagation()" class="bg-white rounded-3xl p-6 max-w-3xl w-full m-4 max-h-[92vh] overflow-auto">
+                    <div class="flex items-start justify-between mb-3">
+                        <div>
+                            <span class="text-3xl font-bold tracking-tight">${stock.ticker}</span>
+                            <span class="ml-2 text-xs px-2 py-0.5 bg-slate-200 rounded align-middle">${(stock._has_buyback_signals || isBuybacksList()) ? 'yfinance + buyback/insider signals' : (stock._market === 'us' || showEdgarForStock(stock) ? 'yfinance + SEC EDGAR' : (stock._market === 'business' ? 'yfinance • Business list' : 'yfinance + ASX Announcements'))}</span>
+                            <div class="text-lg text-slate-600 mt-0.5">${stock.name || ''}</div>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <button data-refresh onclick="document.getElementById('${modalId}').remove(); showModal('${stock.ticker}');" class="text-xs px-2.5 py-1 rounded-2xl border border-slate-200 hover:bg-slate-50 flex items-center gap-1">
+                                <i class="fa-solid fa-sync fa-sm"></i> <span>Refresh</span>
+                            </button>
+                            <button onclick="document.getElementById('${modalId}').remove()" class="text-3xl leading-none text-slate-400 hover:text-slate-600">×</button>
+                        </div>
+                    </div>
+
+                    ${metricsHtml}
+
+                    ${summaryHtml}
+
+                    <div class="mt-4 border-t pt-3">
+                        ${priceChart}
+                    </div>
+
+                    <div class="mt-6 border-t pt-4">
+                        <div class="text-xs font-medium text-slate-600 mb-4">Historical Earnings (EPS)</div>
+                        ${earningsViz}
+                    </div>
+
+                    ${quarterlyBuybackHtml}
+
+                    ${edgarHistoryHtml}
+
+                    ${signalsHtml}
+
+                    <div class="mt-3 pt-2 border-t text-[10px] text-slate-400 flex justify-between">
+                        <div>Last activity: ${stock.last_activity || 'N/A'}</div>
+                        <div>Fresh data fetched on open • Click Refresh for latest</div>
+                    </div>
+                </div>`;
+        }
+
+        function updateMarketButtons(m) {
+            const active = 'px-5 py-2 rounded-2xl font-semibold bg-teal-600 text-white flex items-center gap-2';
+            const inactive = 'px-5 py-2 rounded-2xl font-semibold bg-slate-800 text-slate-300 flex items-center gap-2';
+            const btnBiz = document.getElementById('btn-business');
+            const btnBb = document.getElementById('btn-buybacks');
+            if (btnBiz) btnBiz.className = m === 'business' ? active : inactive;
+            if (btnBb) btnBb.className = m === 'buybacks' ? active : inactive;
+        }
+
+        async function switchMarket(m) {
+            const loadId = ++activeLoadId;
+
+            currentView = 'signals';
+            if (m === 'buybacks') {
+                currentSortCol = 'annual_buyback_pct';
+                currentSortDir = 'desc';
+            } else if (m === 'business') {
+                if (currentSortCol === 'annual_buyback_pct' || currentSortCol === 'buyback_date') {
+                    currentSortCol = 'pct_from_52w_low';
+                    currentSortDir = 'asc';
+                }
+                if (!businessLists.length) await loadBusinessLists();
+                if (!currentBusinessList && businessLists.length) {
+                    currentBusinessList = businessLists[0].list_id || businessLists[0].filename || '';
+                }
+            }
+
+            resetFiltersForMarketSwitch();
+            currentMarket = m;
+            updateMarketButtons(m);
+            clearTableForMarket(m);
+
+            const cached = getCachedMarketData(m);
+            if (cached) {
+                applyMarketPayload(m, cached.stocks, cached.meta, 'client cache', loadId);
+                loadData(m, { loadId, background: true });
+                return;
+            }
+
+            await loadData(m, { loadId });
+        }
+
+        function setView(v) {
+            if (currentMarket !== 'asx') return;
+            currentView = v;
+            const loadId = ++activeLoadId;
+            clearTableForMarket('asx');
+            loadData(currentMarket, { loadId });
+        }
+
+        function updateViewButtons() {
+            const sig = document.getElementById('btn-view-signals');
+            const allb = document.getElementById('btn-view-all');
+            if (!sig || !allb) return;
+            const isAll = currentView === 'all';
+            sig.className = isAll
+                ? 'px-3 py-1 rounded-2xl text-xs font-semibold bg-slate-200 text-slate-700 hover:bg-slate-300 flex items-center gap-1'
+                : 'px-3 py-1 rounded-2xl text-xs font-semibold bg-teal-600 text-white flex items-center gap-1';
+            allb.className = isAll
+                ? 'px-3 py-1 rounded-2xl text-xs font-semibold bg-teal-600 text-white flex items-center gap-1'
+                : 'px-3 py-1 rounded-2xl text-xs font-semibold bg-slate-200 text-slate-700 hover:bg-slate-300 flex items-center gap-1';
+        }
+
+        function refresh() {
+            let qs = `?market=${currentMarket}`;
+            if (currentMarket === 'asx' && currentView === 'all') qs += '&full=1';
+            if (currentMarket === 'business' && currentBusinessList) {
+                qs += `&list=${encodeURIComponent(currentBusinessList)}`;
+            }
+            invalidateMarketCache(currentMarket);
+            const loadId = ++activeLoadId;
+            clearTableForMarket(currentMarket);
+            fetch(`/api/refresh${qs}`, {method:'POST'})
+                .then(() => loadData(currentMarket, { forceRefresh: true, loadId }));
+        }
+
+        async function updateAsxUniverse(ev) {
+            if (currentMarket !== 'asx') return;
+            const btn = ev ? (ev.currentTarget || ev.target) : null;
+            const original = btn ? btn.innerHTML : '';
+            if (btn) btn.disabled = true;
+            try {
+                const r = await fetch('/api/asx/update_universe', { method: 'POST' });
+                const data = await r.json();
+                if (data.error) {
+                    alert('Update failed: ' + data.error);
+                } else if (data.updated) {
+                    alert(`ASX company list updated: ${data.count} listed companies (as of ${data.as_of || 'latest'}).\n\nClick the main "Refresh" button to reload signals with the fresh universe.`);
+                } else {
+                    alert(`No update performed (${data.reason || 'still fresh'}). ${data.count || 0} companies in DB. Last update: ${data.last_update || 'n/a'}`);
+                }
+            } catch (e) {
+                alert('Update error: ' + e);
+            } finally {
+                if (btn) { btn.disabled = false; btn.innerHTML = original || btn.innerHTML; }
+                // Reload to surface new universe_count / as_of in badges
+                loadData(currentMarket);
+            }
+        }
+
+        async function rebuildBusinessYf() {
+            const listId = currentBusinessList;
+            if (currentMarket !== 'business' || !listId) return;
+            if (!confirm('This will force a sequential yfinance refresh for all tickers in this business list.\nIt uses 2s sleeps between calls and can take a long time for large lists.\n\nInactive/delisted symbols are recorded and skipped on future runs.\n\nContinue?')) return;
+
+            const btn = document.getElementById('btn-rebuild-business-yf');
+            const orig = btn ? btn.innerHTML : '';
+            if (btn) { btn.disabled = true; btn.innerHTML = 'Rebuilding... (see logs)'; }
+
+            try {
+                const r = await fetch(`/api/business/rebuild_yf?list=${encodeURIComponent(listId)}`, { method: 'POST' });
+                const data = await r.json();
+                alert((data.message || 'Rebuild started in background.') + '\n\nWatch the server console for progress. Reload later to see updated data.');
+                setTimeout(() => loadData(currentMarket), 3000);
+            } catch (e) {
+                alert('Rebuild request error: ' + e);
+            } finally {
+                if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+            }
+        }
+
+        async function refreshAsxBuybacks() {
+            if (!isBuybacksList()) return;
+            if (!confirm('Incremental ASX refresh (recent announcement pages + PDF-check new insider notices)?\nUsually ~1–2 minutes.\n\nFor full ~3-week backfill, run scripts/collect_asx_announcements.py --backfill\n\nContinue?')) return;
+            const url = '/api/buybacks/refresh_asx?incremental=1';
+            const btn = document.getElementById('btn-refresh-asx');
+            const orig = btn ? btn.innerHTML : '';
+            if (btn) { btn.disabled = true; btn.innerHTML = 'Scraping ASX...'; }
+            try {
+                const r = await fetch(url, { method: 'POST' });
+                const data = await r.json();
+                if (data.status === 'error') {
+                    alert('ASX refresh failed: ' + (data.error || 'unknown'));
+                } else {
+                    alert(data.message || 'ASX data refreshed.');
+                    invalidateMarketCache('business');
+                    loadData('business', { forceRefresh: true });
+                }
+            } catch (e) {
+                alert('ASX refresh error: ' + e);
+            } finally {
+                if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+            }
+        }
+
+        function setUsSecButtonState(running) {
+            const btn = document.getElementById('btn-refresh-us');
+            if (!btn) return;
+            if (running) {
+                btn.disabled = true;
+                btn.innerHTML = '<i class="fa-solid fa-landmark fa-spin fa-xs"></i> SEC scan running…';
+            } else {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fa-solid fa-landmark"></i><span>Refresh US SEC data</span>';
+            }
+        }
+
+        function updateBuybacksInfoSecNote() {
+            if (!isBuybacksList() || !usSecScanNote) return;
+            const info = document.getElementById('buybacks-info');
+            if (!info) return;
+            const marker = ' • SEC ';
+            const base = info.textContent.split(marker)[0];
+            const yfPart = buybacksYfRebuildNote ? ` • ${buybacksYfRebuildNote}` : '';
+            info.textContent = `${base} • ${usSecScanNote}${yfPart}`;
+        }
+
+        function stopUsSecPolling() {
+            if (usSecPollTimer) {
+                clearInterval(usSecPollTimer);
+                usSecPollTimer = null;
+            }
+        }
+
+        async function pollUsSecRefresh() {
+            try {
+                const r = await fetch('/api/buybacks/refresh_us/status');
+                const st = await r.json();
+                if (st.running) {
+                    usSecScanNote = st.message || `SEC scan ${st.tickers_done || 0}/${st.tickers_total || '?'}`;
+                    setUsSecButtonState(true);
+                    updateBuybacksInfoSecNote();
+                    if (isBuybacksList() && (st.phase === 'registry' || (st.tickers_done || 0) % 25 === 0)) {
+                        invalidateMarketCache('business');
+                        loadData('business', { forceRefresh: true, background: true });
+                    }
+                    return;
+                }
+
+                stopUsSecPolling();
+                usSecScanNote = st.error
+                    ? `SEC scan failed: ${st.error}`
+                    : (st.message || 'SEC scan complete');
+                setUsSecButtonState(false);
+                if (isBuybacksList()) {
+                    invalidateMarketCache('business');
+                    await loadData('business', { forceRefresh: true });
+                    updateBuybacksInfoSecNote();
+                }
+            } catch (e) {
+                console.warn('US SEC status poll failed', e);
+            }
+        }
+
+        function startUsSecPolling() {
+            stopUsSecPolling();
+            pollUsSecRefresh();
+            usSecPollTimer = setInterval(pollUsSecRefresh, 10000);
+        }
+
+        async function refreshUsBuybacks() {
+            if (!isBuybacksList()) return;
+            if (!confirm('Start background SEC scan for US Russell 1000 + Nasdaq-100?\n\n• 8-K / 10-Q buyback disclosures (with shares/price from 10-Q tables)\n• Form 4 insider open-market purchases\n\nRuns in the background. Progress shows in the info line below. First full scan can take several hours.\n\nContinue?')) return;
+            setUsSecButtonState(true);
+            usSecScanNote = 'SEC scan starting…';
+            updateBuybacksInfoSecNote();
+            try {
+                const r = await fetch('/api/buybacks/refresh_us?days=365', { method: 'POST' });
+                const data = await r.json();
+                if (data.status === 'error') {
+                    alert('US SEC refresh failed: ' + (data.error || 'unknown'));
+                    setUsSecButtonState(false);
+                    usSecScanNote = '';
+                } else if (data.status === 'already_running') {
+                    alert(data.message || 'US SEC scan already running.');
+                    startUsSecPolling();
+                } else {
+                    startUsSecPolling();
+                }
+            } catch (e) {
+                alert('US SEC refresh error: ' + e);
+                setUsSecButtonState(false);
+                usSecScanNote = '';
+            }
+        }
+
+        async function refreshHkInsiderBuybacks() {
+            if (!isBuybacksList()) return;
+            if (!confirm('Download missing HKEX Disclosure of Interests daily summaries (gap-fill from Apr 2026) and rebuild the insider CSV?\nThis probes each weekday and can take a minute or two.\n\nContinue?')) return;
+            const btn = document.getElementById('btn-refresh-hk-insider');
+            const orig = btn ? btn.innerHTML : '';
+            if (btn) { btn.disabled = true; btn.innerHTML = 'Downloading HK DI...'; }
+            try {
+                const r = await fetch('/api/buybacks/refresh_hk_insider', { method: 'POST' });
+                const data = await r.json();
+                if (data.status === 'error') {
+                    alert('HK insider refresh failed: ' + (data.error || 'unknown'));
+                } else {
+                    alert(data.message || 'HK insider data refreshed.');
+                    invalidateMarketCache('business');
+                    loadData('business', { forceRefresh: true });
+                }
+            } catch (e) {
+                alert('HK insider refresh error: ' + e);
+            } finally {
+                if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+            }
+        }
+
+        async function refreshHkexBuybacks() {
+            if (!isBuybacksList()) return;
+            if (!confirm('Download missing HKEX daily repurchase XLS files (gap-fill from Jan 2025) and rebuild the HK master CSV?\nThis probes each weekday and can take a few minutes.\n\nContinue?')) return;
+            const btn = document.getElementById('btn-refresh-hkex');
+            const orig = btn ? btn.innerHTML : '';
+            if (btn) { btn.disabled = true; btn.innerHTML = 'Downloading HKEX...'; }
+            try {
+                const r = await fetch('/api/buybacks/refresh_hkex', { method: 'POST' });
+                const data = await r.json();
+                if (data.status === 'error') {
+                    alert('HKEX refresh failed: ' + (data.error || 'unknown'));
+                } else {
+                    alert(data.message || 'HKEX data refreshed.');
+                    invalidateMarketCache('business');
+                    loadData('business', { forceRefresh: true });
+                }
+            } catch (e) {
+                alert('HKEX refresh error: ' + e);
+            } finally {
+                if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+            }
+        }
+
+        async function refreshJpxBuybacks() {
+            if (!isBuybacksList()) return;
+            const btn = document.getElementById('btn-refresh-jpx');
+            const orig = btn ? btn.innerHTML : '';
+            if (btn) { btn.disabled = true; btn.innerHTML = 'Scraping JPX...'; }
+            try {
+                const r = await fetch('/api/buybacks/refresh_jpx', { method: 'POST' });
+                const data = await r.json();
+                if (data.status === 'error') {
+                    alert('JPX refresh failed: ' + (data.error || 'unknown'));
+                } else {
+                    alert(data.message || 'JPX data refreshed.');
+                    invalidateMarketCache('business');
+                    loadData('business', { forceRefresh: true });
+                }
+            } catch (e) {
+                alert('JPX refresh error: ' + e);
+            } finally {
+                if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+            }
+        }
+
+        function stopBuybacksYfPolling() {
+            if (buybacksYfPollTimer) {
+                clearInterval(buybacksYfPollTimer);
+                buybacksYfPollTimer = null;
+            }
+        }
+
+        function setBuybacksYfButtonState(running) {
+            const btn = document.getElementById('btn-rebuild-buybacks-yf');
+            if (!btn) return;
+            if (running) {
+                btn.disabled = true;
+                btn.innerHTML = '<i class="fa-solid fa-sync fa-spin fa-xs"></i> Rebuilding YF...';
+            } else {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fa-solid fa-sync fa-xs"></i> Rebuild YF data (slow)';
+            }
+        }
+
+        async function pollBuybacksYfRebuild() {
+            try {
+                const r = await fetch('/api/buybacks/rebuild_yf/status');
+                const st = await r.json();
+                if (st.running) {
+                    const done = st.done || 0;
+                    const total = st.total || '?';
+                    const yfN = st.yf_cached_count != null ? st.yf_cached_count : '?';
+                    buybacksYfRebuildNote = `YF rebuild ${done}/${total} (${yfN} live)`;
+                    setBuybacksYfButtonState(true);
+                    if (isBuybacksList()) {
+                        const info = document.getElementById('buybacks-info');
+                        if (info && info.textContent.indexOf('YF rebuild') === -1) {
+                            info.textContent += ` • ${buybacksYfRebuildNote}`;
+                        } else if (info) {
+                            const base = info.textContent.split(' • YF rebuild')[0];
+                            info.textContent = `${base} • ${buybacksYfRebuildNote}`;
+                        }
+                        invalidateMarketCache('business');
+                        loadData('business', { forceRefresh: true, background: true });
+                    }
+                    return;
+                }
+
+                stopBuybacksYfPolling();
+                buybacksYfRebuildNote = st.error
+                    ? `YF rebuild failed: ${st.error}`
+                    : (st.message || 'YF rebuild complete');
+                setBuybacksYfButtonState(false);
+                if (isBuybacksList()) {
+                    invalidateMarketCache('business');
+                    await loadData('business', { forceRefresh: true });
+                    const info = document.getElementById('buybacks-info');
+                    if (info) info.textContent += ` • ${buybacksYfRebuildNote}`;
+                }
+            } catch (e) {
+                console.warn('buybacks YF status poll failed', e);
+            }
+        }
+
+        function startBuybacksYfPolling() {
+            stopBuybacksYfPolling();
+            pollBuybacksYfRebuild();
+            buybacksYfPollTimer = setInterval(pollBuybacksYfRebuild, 15000);
+        }
+
+        async function rebuildBuybacksYf() {
+            if (!isBuybacksList()) return;
+            if (!confirm('Force sequential yfinance refresh for all buyback-registry tickers?\nThis can take a long time for ~300+ symbols.\nThe table will refresh every 25 tickers.\n\nContinue?')) return;
+            setBuybacksYfButtonState(true);
+            buybacksYfRebuildNote = 'YF rebuild starting…';
+            try {
+                const r = await fetch('/api/buybacks/rebuild_yf', { method: 'POST' });
+                const data = await r.json();
+                if (data.status === 'already_running') {
+                    alert(data.message || 'Rebuild already running.');
+                } else {
+                    alert((data.message || 'Rebuild started.') + '\n\nThe table will update every 25 symbols while the rebuild runs.');
+                }
+                startBuybacksYfPolling();
+            } catch (e) {
+                alert('Rebuild request error: ' + e);
+                setBuybacksYfButtonState(false);
+                buybacksYfRebuildNote = '';
+            }
+        }
+
+        async function rebuildYf() {
+            if (currentMarket !== 'asx' || currentView !== 'all') return;
+            if (!confirm('This will force a *sequential, one-at-a-time* yfinance refresh for stale tickers (or all if forcing full).\nIt uses long sleeps to avoid rate limits and can take 1-3+ HOURS for the full ~2000 ticker universe.\n\nWatch the server console/logs for progress (python app.py).\n\nOnly do this every 2-4 weeks. Continue?')) return;
+
+            const btn = document.getElementById('btn-rebuild-yf');
+            const orig = btn ? btn.innerHTML : '';
+            if (btn) { btn.disabled = true; btn.innerHTML = 'Rebuilding... (hours; see logs)'; }
+
+            try {
+                const r = await fetch('/api/asx/rebuild_yf?market=asx&full=1&force_yf=1', { method: 'POST' });
+                const data = await r.json();
+                alert((data.message || 'Rebuild started in background.') + '\n\nWatch the python app.py console for progress lines like \"yf sequential progress\". Reload later to see updated data. This is intentionally very slow to respect Yahoo rate limits.');
+                // Do not block waiting; just reload meta after a short delay
+                setTimeout(() => loadData(currentMarket), 3000);
+            } catch (e) {
+                alert('Rebuild request error (work may still be running in bg): ' + e);
+            } finally {
+                if (btn) { btn.disabled = false; btn.innerHTML = orig; }
+            }
+        }
+
+        window.onload = async () => {
+            initFilterSliders();
+            currentView = 'signals';
+            await loadBusinessLists();
+            if (!currentBusinessList && businessLists.length) {
+                const bb = businessLists.find(l => (l.list_id || l.filename) === BUILTIN_BUYBACKS_LIST_ID);
+                currentBusinessList = (bb && (bb.list_id || bb.filename))
+                    || businessLists[0].list_id || businessLists[0].filename || '';
+            }
+            loadData('business');
+            fetch('/api/buybacks/rebuild_yf/status')
+                .then(r => r.json())
+                .then(st => { if (st && st.running) startBuybacksYfPolling(); })
+                .catch(() => {});
+            fetch('/api/buybacks/refresh_us/status')
+                .then(r => r.json())
+                .then(st => { if (st && st.running) startUsSecPolling(); })
+                .catch(() => {});
+        };
+    </script>
+</body>
+</html>

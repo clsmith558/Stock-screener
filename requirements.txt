@@ -1,0 +1,15 @@
+flask>=3.0.0
+yfinance>=0.2.52
+pandas>=2.0.0
+edgartools>=4.0.0
+pypdf>=4.0.0
+cryptography>=3.1
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+xlrd>=2.0.1
+pyyaml>=6.0
+python-dotenv>=1.0.0
+# requests is a dependency of yfinance but we use it directly too
+# Optional / heavier:
+# pdfplumber  (better PDF text extraction if needed)
+# tenacity    (more advanced retries)

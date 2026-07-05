@@ -1,0 +1,16 @@
+# Quant score component weights (must sum to 1.0)
+valuation: 0.35
+price_posture: 0.25
+insider: 0.20
+buyback_at_low: 0.20
+
+# Price posture thresholds
+near_52w_low_pct: 15
+below_200w_ma_bonus: true
+
+# Buyback-at-low: pct_from_52w_low must be below this
+buyback_near_low_pct: 20
+
+# Insider: points per buy transaction (capped)
+insider_points_per_buy: 25
+insider_cap: 100
