@@ -12,7 +12,7 @@ import logging
 import re
 import sqlite3
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import requests
 from bs4 import BeautifulSoup
@@ -56,9 +56,23 @@ _SHARES_RE = re.compile(r"^[\d,]+$")
 _SKIP_ROW_LABELS = ("total", "as of", "period", "periods", "fiscal year")
 
 # Plausibility caps for monthly 10-Q repurchase rows (guards misparsed $/scale columns).
+# Monthly issuer-purchase rows that exceed these almost always mean a scale error
+# (e.g. "in thousands" applied twice, or applied to a whole-share column).
 _MAX_SHARES_PER_PERIOD = 150_000_000
 _MAX_DOLLARS_PER_PERIOD = 30_000_000_000.0
-_MAX_FRAC_OUTSTANDING_PERIOD = 0.25
+# Monthly open-market rows above these almost always indicate a scale error.
+_MAX_FRAC_OUTSTANDING_PERIOD = 0.08
+_MAX_FRAC_MCAP_PERIOD = 0.05
+# If large == small*1000 and large is >1% of shares outstanding, prefer small
+# (classic "in thousands" applied to already-whole share counts).
+_THOUSANDS_TIEBREAK_FRAC = 0.01
+
+# Completed purchase period = monthly / fiscal-month Issuer Purchases row, not
+# multi-year authorization / program windows misread as period labels.
+# Real Item 2 rows are ~20–40 days (calendar or 4–5 week fiscal months).
+_MAX_PURCHASE_PERIOD_SPAN_DAYS = 50
+# Allow period_end a few days after filing_date only if needed; default is ≤ filing.
+_PERIOD_END_AFTER_FILING_GRACE_DAYS = 0
 
 _cik_map_cache: dict[str, dict] | None = None
 
@@ -71,8 +85,12 @@ def normalize_repurchase_shares(
     table_multiplier: int = 1,
 ) -> int | None:
     """
-    Normalize share counts from 10-Q tables. Footnotes like "in millions" usually
-    refer to dollar columns; applying ×1M to a share cell produces trillion-share bugs.
+    Normalize share counts from 10-Q tables.
+
+    Footnotes like "in millions" usually refer to dollar columns; applying ×1M
+    to a share cell produces absurd buybacks. We try scale candidates and keep
+    the *largest* count that still looks economically plausible given shares
+    outstanding and price (when known).
     """
     try:
         raw = int(float(raw_shares))
@@ -98,24 +116,47 @@ def normalize_repurchase_shares(
     def _plausible(shares: int) -> bool:
         if shares < 1 or shares > _MAX_SHARES_PER_PERIOD:
             return False
+        spend = (shares * price) if (price and price > 0) else 0.0
+        if spend > _MAX_DOLLARS_PER_PERIOD:
+            return False
         if shares_outstanding and shares_outstanding > 0:
             if shares > shares_outstanding * _MAX_FRAC_OUTSTANDING_PERIOD:
                 return False
-        if price and price > 0:
-            if shares * price > _MAX_DOLLARS_PER_PERIOD:
-                return False
+            if price and price > 0:
+                mcap = shares_outstanding * price
+                if mcap > 0 and spend > mcap * _MAX_FRAC_MCAP_PERIOD:
+                    return False
         return True
 
     good = [c for c in candidates if _plausible(c)]
     if not good:
         logger.debug(
-            "Rejected implausible repurchase shares raw=%s mult=%s price=%s",
+            "Rejected implausible repurchase shares raw=%s mult=%s price=%s so=%s",
             raw,
             table_multiplier,
             price,
+            shares_outstanding,
         )
         return None
-    return max(good)
+
+    # Largest plausible keeps real mega-cap buybacks (AAPL tens of millions).
+    chosen = max(good)
+
+    # Tie-break accidental ×1000: when both N and N*1000 look "plausible" but
+    # N*1000 is already a large slice of the float, prefer N.
+    if shares_outstanding and shares_outstanding > 0 and len(good) >= 2:
+        for c in sorted(good):
+            if c * 1000 == chosen and c >= 100:
+                if chosen > shares_outstanding * _THOUSANDS_TIEBREAK_FRAC:
+                    logger.debug(
+                        "Prefer %s over %s shares (×1000 scale tie-break, so=%.0f)",
+                        c,
+                        chosen,
+                        shares_outstanding,
+                    )
+                    return c
+                break
+    return chosen
 
 
 def _conn(db_path: str = DEFAULT_UNIVERSE_DB):
@@ -319,15 +360,116 @@ def _log_scan(accession: str, ticker: str, matched: bool, db_path: str):
 
 
 def _parse_us_date(label: str) -> str | None:
+    """End date of a Month D, YYYY … Month D, YYYY range (ISO YYYY-MM-DD)."""
+    bounds = parse_period_range_bounds(label)
+    if not bounds:
+        return None
+    return bounds[1].strftime("%Y-%m-%d")
+
+
+def _parse_month_day_year(text: str) -> date | None:
+    s = (text or "").strip()
+    if not s:
+        return None
+    for fmt in ("%B %d, %Y", "%b %d, %Y"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def parse_period_range_bounds(label: str) -> tuple[date, date] | None:
+    """
+    Parse start/end dates from an SEC period label like
+    'June 1, 2025 to June 30, 2025'. Returns None if not a clean range.
+    """
     label = (label or "").strip().rstrip(":")
     m = _PERIOD_RANGE_RE.search(label)
     if not m:
         return None
-    try:
-        end = datetime.strptime(m.group("end").strip(), "%B %d, %Y")
-        return end.strftime("%Y-%m-%d")
-    except ValueError:
+    start = _parse_month_day_year(m.group("start"))
+    end = _parse_month_day_year(m.group("end"))
+    if not start or not end or end < start:
         return None
+    return start, end
+
+
+def is_completed_purchase_period(
+    period_label: str | None = None,
+    period_end: str | None = None,
+    filing_date: str | None = None,
+    as_of: date | None = None,
+    *,
+    max_span_days: int = _MAX_PURCHASE_PERIOD_SPAN_DAYS,
+) -> bool:
+    """
+    True only for a last *completed purchase period* row (Item 2 monthly /
+    fiscal-month open-market window), not authorization or program end dates.
+
+    Rules:
+      - Label is a date range with span in 0..max_span_days (default 50)
+      - period_end is present and parseable
+      - period_end ≤ as_of (default: today) — period has finished
+      - if filing_date known: period_end ≤ filing_date (reported as completed)
+    """
+    as_of = as_of or datetime.now().date()
+    pe = None
+    if period_end:
+        try:
+            pe = datetime.strptime(str(period_end)[:10], "%Y-%m-%d").date()
+        except ValueError:
+            pe = None
+
+    bounds = parse_period_range_bounds(period_label or "")
+    if bounds:
+        start, end = bounds
+        span = (end - start).days
+        if span < 0 or span > max_span_days:
+            return False
+        if pe is None:
+            pe = end
+        elif pe != end:
+            # Prefer explicit period_end when present, but still require short span
+            pass
+    else:
+        # No parseable range → cannot verify monthly purchase period
+        if pe is None:
+            return False
+        # Bare period_end without a short range is not enough to treat as monthly
+        return False
+
+    if pe is None or pe > as_of:
+        return False
+
+    if filing_date:
+        try:
+            fd = datetime.strptime(str(filing_date)[:10], "%Y-%m-%d").date()
+            grace = timedelta(days=_PERIOD_END_AFTER_FILING_GRACE_DAYS)
+            if pe > fd + grace:
+                return False
+        except ValueError:
+            pass
+
+    return True
+
+
+def filter_completed_purchase_periods(
+    rows: list[dict],
+    *,
+    as_of: date | None = None,
+) -> list[dict]:
+    """Keep only rows that look like completed monthly/fiscal-month purchase periods."""
+    out = []
+    for r in rows or []:
+        if is_completed_purchase_period(
+            period_label=r.get("period_label"),
+            period_end=r.get("period_end") or r.get("date"),
+            filing_date=r.get("filing_date"),
+            as_of=as_of,
+        ):
+            out.append(r)
+    return out
 
 
 def _parse_shares_cell(val: str) -> int | None:
@@ -376,26 +518,33 @@ def _is_repurchase_table(table) -> bool:
 
 def _shares_multiplier(table, section_text: str, filing_text: str = "") -> int:
     """
-    Scale share counts when the filing states share figures are in thousands.
-    Do NOT apply 'in millions' to share columns — that footnote almost always
-    refers to dollar amounts (e.g. TMUS), which caused trillion-share errors.
+    Scale share counts only when the filing *explicitly* says share amounts are
+    in thousands. Generic "dollars in thousands" footnotes must NOT scale shares
+    (that produced 1000× overstatement for names like MTDR).
     """
     ctx = " ".join([
         (section_text or "").lower(),
         (filing_text or "")[:8000].lower(),
     ])
     near = table.get_text(" ", strip=True).lower()
-    share_ctx = "share" in near or "shares purchased" in near or "shares" in ctx
-    if share_ctx and (
-        "in thousands" in ctx
-        or "reflected in thousands" in ctx
-        or "which are in thousands" in ctx
-        or "in thousands" in near
-    ):
-        return 1000
+
+    # Explicit share-unit footnotes only
+    share_unit_patterns = (
+        r"shares?\s+(?:are\s+)?(?:presented\s+|reflected\s+|shown\s+)?in\s+thousands",
+        r"(?:number|amounts?)\s+of\s+shares?\s+(?:are\s+)?in\s+thousands",
+        r"share\s+amounts?\s+(?:are\s+)?in\s+thousands",
+        r"in\s+thousands[,\s]+except\s+(?:share|per\s+share)",
+    )
+    for pat in share_unit_patterns:
+        if re.search(pat, near) or re.search(pat, ctx):
+            return 1000
+
+    # Narrow: "in thousands" sitting in the repurchase table itself next to share headers
     if (
         "in thousands" in near
         and "total number of shares" in near
+        and "dollar" not in near
+        and "consideration" not in near
     ):
         return 1000
     return 1
@@ -456,7 +605,11 @@ def _parse_repurchase_table(
                 shares_outstanding=shares_outstanding,
                 table_multiplier=multiplier,
             )
-            if norm is not None and current_period_end:
+            if norm is not None and current_period_end and is_completed_purchase_period(
+                period_label=current_period_label,
+                period_end=current_period_end,
+                # filing_date unknown at parse time; still require short span + not-future
+            ):
                 rows_out.append({
                     "period_label": current_period_label,
                     "period_end": current_period_end,
@@ -483,7 +636,10 @@ def _parse_repurchase_table(
                 shares_outstanding=shares_outstanding,
                 table_multiplier=multiplier,
             )
-            if norm is not None:
+            if norm is not None and is_completed_purchase_period(
+                period_label=current_period_label or label,
+                period_end=current_period_end,
+            ):
                 rows_out.append({
                     "period_label": current_period_label or label,
                     "period_end": current_period_end,
@@ -572,7 +728,10 @@ def _parse_repurchases_from_text(text: str, shares_outstanding: float | None = N
                 if s > 0 and shares is None:
                     shares = s
         norm = normalize_repurchase_shares(shares, price=price, shares_outstanding=shares_outstanding)
-        if norm:
+        if norm and is_completed_purchase_period(
+            period_label=label,
+            period_end=period_end,
+        ):
             rows.append({
                 "period_label": label,
                 "period_end": period_end,
@@ -670,6 +829,13 @@ def _replace_repurchases(
         if not period_end or not shares:
             continue
         period_label = row.get("period_label") or period_end
+        # Persist only completed purchase periods (not auth/program windows)
+        if not is_completed_purchase_period(
+            period_label=period_label,
+            period_end=period_end,
+            filing_date=filing_date,
+        ):
+            continue
         price = row.get("price")
         headline = _repurchase_headline(period_label, int(shares), price)
         cur = conn.execute(
@@ -730,6 +896,46 @@ def _shares_outstanding_from_yf_cached(yf_symbol: str, yf_cache: dict | None = N
     return 0.0
 
 
+def purge_non_completed_repurchases(db_path: str = DEFAULT_UNIVERSE_DB) -> int:
+    """
+    Delete SEC repurchase rows that are not completed purchase periods
+    (authorization/program windows, multi-year spans, period after filing).
+    Returns number of rows deleted.
+    """
+    try:
+        conn = _conn(db_path)
+        rows = conn.execute(
+            """
+            SELECT id, period_end, period_label, filing_date
+            FROM us_buyback_repurchases
+            """
+        ).fetchall()
+        drop_ids = []
+        for rid, period_end, period_label, filing_date in rows:
+            if not is_completed_purchase_period(
+                period_label=period_label,
+                period_end=period_end,
+                filing_date=filing_date,
+            ):
+                drop_ids.append(rid)
+        if drop_ids:
+            conn.executemany(
+                "DELETE FROM us_buyback_repurchases WHERE id=?",
+                [(i,) for i in drop_ids],
+            )
+            conn.commit()
+        conn.close()
+        if drop_ids:
+            logger.info(
+                "Purged %d non-completed SEC repurchase rows (auth/program windows)",
+                len(drop_ids),
+            )
+        return len(drop_ids)
+    except Exception as e:
+        logger.warning("purge_non_completed_repurchases failed: %s", e)
+        return 0
+
+
 def load_us_buyback_repurchases(db_path: str = DEFAULT_UNIVERSE_DB) -> list[dict]:
     try:
         conn = _conn(db_path)
@@ -757,8 +963,17 @@ def load_us_buyback_repurchases(db_path: str = DEFAULT_UNIVERSE_DB) -> list[dict
 
     out = []
     for ticker, yf, period_end, period_label, shares, price, form, accession, filing_date, headline, url, source in rows:
+        # Drop authorization/program windows still in SQLite from older scans.
+        if not is_completed_purchase_period(
+            period_label=period_label,
+            period_end=period_end,
+            filing_date=filing_date,
+        ):
+            continue
         pr = float(price) if price is not None else None
         so = _shares_outstanding_from_yf_cached(yf, yf_cache)
+        # Re-normalize stored values (older scans may have over-applied ×1000).
+        # table_multiplier=1: stored figure is already post-parse; only de-scale if needed.
         norm = normalize_repurchase_shares(
             shares,
             price=pr,
@@ -767,6 +982,9 @@ def load_us_buyback_repurchases(db_path: str = DEFAULT_UNIVERSE_DB) -> list[dict
         )
         if not norm:
             continue
+        # Always rebuild headline from normalized shares so UI (signals list) matches
+        # chart hover / quarterly tables (stale headlines had pre-fixup ×1000 counts).
+        rebuilt = _repurchase_headline(period_label or period_end, int(norm), pr)
         out.append({
             "yf_symbol": yf,
             "ticker": ticker,
@@ -774,7 +992,7 @@ def load_us_buyback_repurchases(db_path: str = DEFAULT_UNIVERSE_DB) -> list[dict
             "period_end": period_end,
             "period_label": period_label,
             "form": form,
-            "headline": headline or "",
+            "headline": rebuilt,
             "url": url or "",
             "source": source or "SEC",
             "accession": accession,
@@ -782,6 +1000,7 @@ def load_us_buyback_repurchases(db_path: str = DEFAULT_UNIVERSE_DB) -> list[dict
             "shares_purchased": norm,
             "shares": norm,
             "price": pr,
+            "shares_raw_stored": int(shares) if shares is not None else None,
         })
     return out
 

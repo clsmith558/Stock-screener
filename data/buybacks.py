@@ -149,6 +149,8 @@ def _registry_needs_rebuild(db_path: str = DEFAULT_UNIVERSE_DB) -> bool:
     current_asx_buyback = _count_asx_buyback_events()
     current_us_buyback = _count_us_buyback_events()
     current_us_insider = _count_us_insider_purchases()
+    # Force rebuild when Latest Buyback semantics change (completed purchase period only).
+    stored_semantics = _registry_get_meta("latest_buyback_semantics", db_path)
     return (
         stored_tse != _csv_mtime(TSE_CSV_PATH)
         or stored_hk != _csv_mtime(HK_CSV_PATH)
@@ -157,6 +159,7 @@ def _registry_needs_rebuild(db_path: str = DEFAULT_UNIVERSE_DB) -> bool:
         or stored_asx_buyback != str(current_asx_buyback)
         or stored_us_buyback != str(current_us_buyback)
         or stored_us_insider != str(current_us_insider)
+        or stored_semantics != "completed_period_v1"
     )
 
 
@@ -197,6 +200,7 @@ def _save_registry(rows: list, meta: dict, db_path: str = DEFAULT_UNIVERSE_DB):
         "asx_buyback_rows": meta.get("asx_buyback_rows", 0),
         "us_buyback_rows": meta.get("us_buyback_rows", 0),
         "us_insider_rows": meta.get("us_insider_rows", 0),
+        "latest_buyback_semantics": "completed_period_v1",
     }, db_path)
 
 
@@ -511,11 +515,27 @@ def load_asx_insider_events(db_path: str = DEFAULT_UNIVERSE_DB) -> list:
 
 
 def load_asx_buyback_events(db_path: str = DEFAULT_UNIVERSE_DB) -> list:
+    """
+    Load ASX buy-back announcements with optional PDF-parsed metrics.
+
+    Daily Appendix 3C / 3E notices include:
+    - shares purchased on previous day
+    - highest / lowest price paid
+    - total consideration (used to derive average price)
+    """
     try:
         conn = sqlite3.connect(db_path)
+        # Ensure metric columns exist (added by asx_announcements.init_db)
+        try:
+            from asx_announcements import init_db as _init_asx_db
+            _init_asx_db(db_path)
+        except Exception:
+            pass
         rows = conn.execute(
             """
-            SELECT ticker, date, headline, url
+            SELECT ticker, date, headline, url,
+                   shares_purchased, shares_before, price_high, price_low,
+                   price_avg, consideration, metrics_json
             FROM announcements
             WHERE classification = 'buyback'
             ORDER BY date DESC
@@ -527,10 +547,42 @@ def load_asx_buyback_events(db_path: str = DEFAULT_UNIVERSE_DB) -> list:
         return []
 
     events = []
-    for ticker, date, headline, url in rows:
+    for row in rows:
+        ticker, date, headline, url = row[0], row[1], row[2], row[3]
+        shares_purchased = row[4]
+        shares_before = row[5]
+        price_high = row[6]
+        price_low = row[7]
+        price_avg = row[8]
+        consideration = row[9]
+        metrics_json = row[10]
+        metrics = {}
+        if metrics_json:
+            try:
+                metrics = json.loads(metrics_json) or {}
+            except Exception:
+                metrics = {}
+
         sym = _asx_base_to_yf(ticker)
         if not sym:
             continue
+
+        shares = shares_purchased if shares_purchased is not None else metrics.get("shares_purchased")
+        price = price_avg if price_avg is not None else metrics.get("price_avg") or metrics.get("price")
+        if price is None:
+            price = price_high if price_high is not None else metrics.get("price_high")
+        if price is None and shares and consideration:
+            try:
+                if float(shares) > 0:
+                    price = float(consideration) / float(shares)
+            except (TypeError, ValueError):
+                pass
+
+        ph = price_high if price_high is not None else metrics.get("price_high")
+        pl = price_low if price_low is not None else metrics.get("price_low")
+        cons = consideration if consideration is not None else metrics.get("consideration")
+        sb = shares_before if shares_before is not None else metrics.get("shares_before")
+
         events.append({
             "yf_symbol": sym,
             "ticker_base": ticker,
@@ -538,7 +590,13 @@ def load_asx_buyback_events(db_path: str = DEFAULT_UNIVERSE_DB) -> list:
             "headline": headline or "",
             "url": url or "",
             "source": "ASX",
-            "shares_purchased": None,
+            "shares_purchased": int(shares) if shares is not None else None,
+            "shares": int(shares) if shares is not None else None,
+            "shares_before": int(sb) if sb is not None else None,
+            "price": _safe_float(price) if price is not None else None,
+            "price_high": _safe_float(ph) if ph is not None else None,
+            "price_low": _safe_float(pl) if pl is not None else None,
+            "consideration": _safe_float(cons) if cons is not None else None,
         })
     return events
 
@@ -756,10 +814,35 @@ def build_quarterly_buyback_breakdown(
     return out
 
 
+def _completed_buyback_date(val) -> str | None:
+    """Return ISO date if val is a completed (not future) activity date, else None."""
+    s = (val if isinstance(val, str) else "") or ""
+    s = s.strip()[:10]
+    if len(s) < 10:
+        return None
+    try:
+        d = datetime.strptime(s, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    if d > datetime.now().date():
+        return None
+    return s
+
+
 def _dedupe_us_repurchase_rows(rows: list, year: int) -> dict:
-    """Dedupe 10-Q monthly repurchase rows by period label (latest filing wins)."""
+    """
+    Dedupe 10-Q monthly repurchase rows by period label (latest filing wins).
+
+    Only *completed purchase periods* are kept (short monthly/fiscal-month span,
+    period_end not after filing or today). Authorization / program windows are dropped.
+    """
+    try:
+        from data.us_buybacks import is_completed_purchase_period
+    except Exception:
+        is_completed_purchase_period = None
+
     min_year = 2010
-    max_year = year + 1
+    max_year = year  # completed periods cannot end after the current calendar year
     deduped = {}
     for r in rows:
         pe = (r.get("period_end") or r.get("date") or "").strip()
@@ -772,6 +855,17 @@ def _dedupe_us_repurchase_rows(rows: list, year: int) -> dict:
         if period_year < min_year or period_year > max_year:
             continue
         label = (r.get("period_label") or pe).strip()
+        if is_completed_purchase_period is not None:
+            if not is_completed_purchase_period(
+                period_label=label,
+                period_end=pe,
+                filing_date=r.get("filing_date"),
+            ):
+                continue
+        else:
+            # Fallback: never treat future period_end as latest buyback
+            if pe > datetime.now().strftime("%Y-%m-%d"):
+                continue
         fd = r.get("filing_date") or ""
         existing = deduped.get(label)
         if not existing or fd > (existing.get("filing_date") or ""):
@@ -842,14 +936,26 @@ def _aggregate_us(events: list, year: int) -> dict:
         history = []
         for r in rep_sorted[:12]:
             sh = r.get("shares") or r.get("shares_purchased")
+            pr = _safe_float(r.get("price"))
+            # Prefer live-normalized headline (load_us_buyback_repurchases rebuilds it).
+            # Fall back to a consistent shares/price line — never trust stale DB text alone.
+            if r.get("headline") and sh:
+                desc = r.get("headline")
+            elif sh:
+                label = r.get("period_label") or "repurchase"
+                desc = f"SEC 10-Q: {label} — {int(sh):,} shares"
+                if pr:
+                    desc += f" — @ ${pr:.2f}"
+            else:
+                desc = r.get("headline") or f"SEC 10-Q: {r.get('period_label') or 'repurchase'}"
             history.append({
                 "date": r.get("period_end") or r.get("date"),
                 "type": "buyback",
-                "desc": r.get("headline") or f"SEC 10-Q: {r.get('period_label') or 'repurchase'}",
-                "headline": r.get("headline"),
+                "desc": desc,
+                "headline": desc,
                 "url": r.get("url"),
                 "shares": int(sh) if sh else None,
-                "price": _safe_float(r.get("price")),
+                "price": pr,
                 "source": "SEC",
             })
         seen_dates = {h.get("date") for h in history}
@@ -869,13 +975,17 @@ def _aggregate_us(events: list, year: int) -> dict:
             })
             seen_dates.add(d)
 
+        # Latest Buyback = last *completed purchase period* only (not 8-K/10-Q filing date,
+        # not multi-year authorization end dates).
         latest_rep = rep_sorted[0] if rep_sorted else None
-        buyback_date = (
-            (latest_rep.get("period_end") or latest_rep.get("date"))
-            if latest_rep
-            else (latest_filing.get("date") if latest_filing else None)
+        buyback_date = None
+        if latest_rep:
+            buyback_date = _completed_buyback_date(
+                latest_rep.get("period_end") or latest_rep.get("date")
+            )
+        last_activity = buyback_date or (
+            _completed_buyback_date(latest_filing.get("date") if latest_filing else None)
         )
-        last_activity = buyback_date or (latest_filing.get("date") if latest_filing else None)
         year_evs = [e for e in evs if (e.get("date") or "")[:4] == year_prefix]
 
         out[sym] = {
@@ -938,11 +1048,20 @@ def _aggregate_tse(df: pd.DataFrame, year: int) -> dict:
             })
 
         latest_dt = latest_row["Implementation Date"]
+        # Prefer last completed implementation date (not future plan ends).
+        completed_impl = None
+        today = datetime.now().date()
+        for _, row in grp.iterrows():
+            impl = row["Implementation Date"]
+            if pd.notna(impl) and impl.date() <= today:
+                completed_impl = impl
+                break
+        buyback_dt = completed_impl if completed_impl is not None else None
         out[sym] = {
             "yf_symbol": sym,
             "name": latest_row.get("Issue Name") or sym,
             "source": "TSE",
-            "buyback_date": latest_dt.strftime("%Y-%m-%d") if pd.notna(latest_dt) else None,
+            "buyback_date": buyback_dt.strftime("%Y-%m-%d") if buyback_dt is not None and pd.notna(buyback_dt) else None,
             "annual_buyback_pct": annual_pct,
             "annual_shares_purchased": int(annual_shares) if pd.notna(annual_shares) else 0,
             "shares_outstanding": shares_out,
@@ -950,7 +1069,11 @@ def _aggregate_tse(df: pd.DataFrame, year: int) -> dict:
             "buyback_events_total": len(grp),
             "buyback_announced": True,
             "buyback_history": history,
-            "last_activity": latest_dt.strftime("%Y-%m-%d") if pd.notna(latest_dt) else None,
+            "last_activity": (
+                buyback_dt.strftime("%Y-%m-%d")
+                if buyback_dt is not None and pd.notna(buyback_dt)
+                else (latest_dt.strftime("%Y-%m-%d") if pd.notna(latest_dt) else None)
+            ),
             "csv_snapshot": _csv_snapshot_from_row(latest_row),
         }
     return out
@@ -1015,11 +1138,19 @@ def _aggregate_hk(df: pd.DataFrame, year: int) -> dict:
             })
 
         latest_dt = latest_row["Trading Date"]
+        today = datetime.now().date()
+        completed_td = None
+        for _, row in grp.iterrows():
+            td = row["Trading Date"]
+            if pd.notna(td) and td.date() <= today:
+                completed_td = td
+                break
+        buyback_dt = completed_td if completed_td is not None else None
         out[sym] = {
             "yf_symbol": sym,
             "name": latest_row.get("Company") or sym,
             "source": "HKEX",
-            "buyback_date": latest_dt.strftime("%Y-%m-%d") if pd.notna(latest_dt) else None,
+            "buyback_date": buyback_dt.strftime("%Y-%m-%d") if buyback_dt is not None and pd.notna(buyback_dt) else None,
             "annual_buyback_pct": annual_pct,
             "annual_shares_purchased": int(annual_shares) if pd.notna(annual_shares) else 0,
             "shares_outstanding": shares_out,
@@ -1027,7 +1158,11 @@ def _aggregate_hk(df: pd.DataFrame, year: int) -> dict:
             "buyback_events_total": len(grp),
             "buyback_announced": True,
             "buyback_history": history,
-            "last_activity": latest_dt.strftime("%Y-%m-%d") if pd.notna(latest_dt) else None,
+            "last_activity": (
+                buyback_dt.strftime("%Y-%m-%d")
+                if buyback_dt is not None and pd.notna(buyback_dt)
+                else (latest_dt.strftime("%Y-%m-%d") if pd.notna(latest_dt) else None)
+            ),
             "csv_snapshot": _csv_snapshot_from_hk_row(latest_row),
         }
     return out
@@ -1043,28 +1178,63 @@ def _aggregate_asx(events: list, year: int) -> dict:
         evs.sort(key=lambda e: e.get("date") or "", reverse=True)
         latest = evs[0]
         year_evs = [e for e in evs if (e.get("date") or "")[:4] == str(year)]
-        history = [{
-            "date": e.get("date"),
-            "type": "buyback",
-            "desc": e.get("headline") or "ASX buy-back announcement",
-            "headline": e.get("headline"),
-            "url": e.get("url"),
-            "source": "ASX",
-        } for e in evs[:12]]
 
+        year_shares = 0
+        for e in year_evs:
+            sh = e.get("shares_purchased") or e.get("shares")
+            if sh:
+                try:
+                    year_shares += int(sh)
+                except (TypeError, ValueError):
+                    pass
+
+        history = []
+        for e in evs[:12]:
+            sh = e.get("shares_purchased") or e.get("shares")
+            pr = e.get("price")
+            desc = e.get("headline") or "ASX buy-back announcement"
+            if sh:
+                try:
+                    if pr:
+                        desc = f"ASX: {int(sh):,} shares @ {pr}"
+                    else:
+                        desc = f"ASX: {int(sh):,} shares bought back"
+                except (TypeError, ValueError):
+                    pass
+            history.append({
+                "date": e.get("date"),
+                "type": "buyback",
+                "desc": desc,
+                "headline": e.get("headline"),
+                "url": e.get("url"),
+                "source": "ASX",
+                "shares": int(sh) if sh else None,
+                "price": _safe_float(pr) if pr is not None else None,
+                "price_high": e.get("price_high"),
+                "price_low": e.get("price_low"),
+                "consideration": e.get("consideration"),
+            })
+
+        buyback_date = None
+        for e in evs:
+            d = _completed_buyback_date(e.get("date"))
+            if d:
+                buyback_date = d
+                break
         out[sym] = {
             "yf_symbol": sym,
             "name": sym.replace(".AX", ""),
             "source": "ASX",
-            "buyback_date": latest.get("date"),
+            "buyback_date": buyback_date,
+            # % of shares outstanding filled in _compose_buyback_display_row when yf is available
             "annual_buyback_pct": 0,
-            "annual_shares_purchased": 0,
+            "annual_shares_purchased": year_shares,
             "shares_outstanding": None,
             "buyback_events_year": len(year_evs),
             "buyback_events_total": len(evs),
             "buyback_announced": True,
             "buyback_history": history,
-            "last_activity": latest.get("date"),
+            "last_activity": buyback_date or latest.get("date"),
             "csv_snapshot": {},
         }
     return out
@@ -1201,6 +1371,42 @@ def _merge_aggregates(*agg_dicts) -> dict:
     return merged
 
 
+def _enrich_buyback_rows_reorg(rows: list) -> list:
+    try:
+        from data.bankruptcy_reorg import enrich_stocks_reorg_cached
+        return enrich_stocks_reorg_cached(rows)
+    except Exception as e:
+        logger.debug("Reorg cache enrich skipped for buybacks: %s", e)
+        return rows
+
+
+def _enrich_buyback_rows_reserves(rows: list) -> list:
+    try:
+        from data.mining_reserves import enrich_stocks_reserves_cached
+        return enrich_stocks_reserves_cached(rows)
+    except Exception as e:
+        logger.debug("Reserves cache enrich skipped for buybacks: %s", e)
+        return rows
+
+
+def _enrich_buyback_rows_costs(rows: list) -> list:
+    try:
+        from data.mining_costs import enrich_stocks_costs_cached
+        return enrich_stocks_costs_cached(rows)
+    except Exception as e:
+        logger.debug("Unit-cost cache enrich skipped for buybacks: %s", e)
+        return rows
+
+
+def _enrich_buyback_rows_asx_mining(rows: list) -> list:
+    try:
+        from data.asx_mining import enrich_stocks_asx_mining_cached
+        return enrich_stocks_asx_mining_cached(rows)
+    except Exception as e:
+        logger.debug("ASX mining cache enrich skipped for buybacks: %s", e)
+        return rows
+
+
 def _enrich_buyback_rows_edgar(rows: list) -> list:
     """Attach cached SEC EDGAR metrics for US tickers (table + filters)."""
     try:
@@ -1212,9 +1418,13 @@ def _enrich_buyback_rows_edgar(rows: list) -> list:
 
 
 def _finalize_buyback_list_rows(rows: list) -> list:
-    """Apply runtime patches (names, US indices, EDGAR) before API response."""
+    """Apply runtime patches (names, US indices, EDGAR, reorg, reserves, costs) before API response."""
     rows = _apply_asx_official_names(_apply_us_indices(rows))
-    return _enrich_buyback_rows_edgar(rows)
+    rows = _enrich_buyback_rows_edgar(rows)
+    rows = _enrich_buyback_rows_reorg(rows)
+    rows = _enrich_buyback_rows_reserves(rows)
+    rows = _enrich_buyback_rows_costs(rows)
+    return _enrich_buyback_rows_asx_mining(rows)
 
 
 def _apply_us_indices(rows: list, index_sets: dict = None) -> list:
@@ -1382,9 +1592,17 @@ def _compose_buyback_display_row(
     if registry_signals:
         row["signals"] = registry_signals
 
-    shares_out = signal_row.get("shares_outstanding")
+    shares_out = signal_row.get("shares_outstanding") or _shares_outstanding_from_yf(use_ydat or {})
     if shares_out:
         row.setdefault("metrics", {})["shares_outstanding"] = shares_out
+        # Fill ASX (and any other) annual % when we have year share totals but no pct yet
+        year_shares = signal_row.get("annual_shares_purchased") or row.get("annual_shares_purchased") or 0
+        if year_shares and not (row.get("annual_buyback_pct") or 0) and shares_out > 0:
+            try:
+                pct = _safe_round(float(year_shares) / float(shares_out) * 100, 2)
+                row["annual_buyback_pct"] = min(pct, 100.0) if pct else 0
+            except (TypeError, ValueError, ZeroDivisionError):
+                pass
 
     if sym.endswith(".AX"):
         row["name"] = asx_official_name(sym, asx_univ, fallback=row.get("name") or sym)
@@ -1485,6 +1703,11 @@ def _rebuild_registry(force_yf: bool = False) -> tuple:
     t1 = time.time()
     asx_events = load_asx_buyback_events()
     asx_insider_events = load_asx_insider_events()
+    try:
+        from data.us_buybacks import purge_non_completed_repurchases
+        purge_non_completed_repurchases()
+    except Exception as e:
+        logger.debug("US repurchase purge skipped: %s", e)
     us_events = load_us_buyback_events()
     us_insider_events = load_us_insider_events()
     agg = _merge_aggregates(
@@ -2064,6 +2287,7 @@ def _load_repurchase_history_for_symbol(
                     continue
                 events.append({
                     "date": d,
+                    "period_label": ev.get("period_label") or "",
                     "shares": ev.get("shares") or ev.get("shares_purchased"),
                     "price": _safe_float(ev.get("price")),
                     "source": "SEC",
@@ -2278,6 +2502,32 @@ def sync_builtin_buybacks_list(
     }
 
 
+def _signals_from_repurchase_history(reps: list) -> list:
+    """Build signal rows from live normalized repurchase events (matches chart volumes)."""
+    out = []
+    for r in sorted(reps or [], key=lambda x: x.get("date") or "", reverse=True)[:12]:
+        sh = r.get("shares")
+        pr = r.get("price")
+        label = r.get("period_label") or r.get("date") or "repurchase"
+        src = r.get("source") or "SEC"
+        if sh:
+            desc = f"{src} 10-Q: {label} — {int(sh):,} shares"
+            if pr:
+                desc += f" — @ ${float(pr):.2f}"
+        else:
+            desc = f"{src}: {label}"
+        out.append({
+            "date": r.get("date"),
+            "type": "buyback",
+            "desc": desc,
+            "headline": desc,
+            "shares": int(sh) if sh else None,
+            "price": pr,
+            "source": src,
+        })
+    return out
+
+
 def merge_buyback_registry_into_stock(stock: dict, sym: str = None) -> dict:
     """Overlay buyback registry + detail history onto a stock dict (modal/detail)."""
     sym = (sym or stock.get("ticker") or "").strip().upper()
@@ -2291,12 +2541,6 @@ def merge_buyback_registry_into_stock(stock: dict, sym: str = None) -> dict:
     overlay = _overlay_from_registry_row(registry)
     stock.update(overlay)
 
-    registry_signals = registry.get("signals") or []
-    if registry_signals and not (
-        len(registry_signals) == 1 and registry_signals[0].get("type") == "note"
-    ):
-        stock["signals"] = registry_signals
-
     stock["buyback_repurchases"] = _load_repurchase_history_for_symbol(sym)
     stock["insider_purchases"] = _load_insider_purchases_for_symbol(sym)
     shares_out = _shares_outstanding_from_yf(
@@ -2306,6 +2550,28 @@ def merge_buyback_registry_into_stock(stock: dict, sym: str = None) -> dict:
         sym,
         shares_outstanding=shares_out,
     )
+
+    # Live repurchase lines (normalized shares) so modal signals match chart hover.
+    live_buyback_sigs = _signals_from_repurchase_history(stock.get("buyback_repurchases") or [])
+    registry_signals = registry.get("signals") or []
+    non_buyback = [
+        s for s in registry_signals
+        if (s.get("type") or "").lower() not in ("buyback",)
+        and not (
+            len(registry_signals) == 1 and registry_signals[0].get("type") == "note"
+        )
+    ]
+    if live_buyback_sigs or non_buyback:
+        merged_sigs = live_buyback_sigs + [
+            s for s in non_buyback if (s.get("type") or "").lower() != "note"
+        ]
+        merged_sigs.sort(key=lambda s: s.get("date") or "", reverse=True)
+        stock["signals"] = merged_sigs[:20]
+    elif registry_signals and not (
+        len(registry_signals) == 1 and registry_signals[0].get("type") == "note"
+    ):
+        stock["signals"] = registry_signals
+
     stock["_has_buyback_signals"] = True
     return stock
 

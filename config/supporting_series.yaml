@@ -1,0 +1,913 @@
+# Supporting time-series catalog + company exposures.
+# Scope: energy_pilot.csv ∪ commodity_producers.yaml.
+# Collector (scripts/collect_supporting_series.py):
+#   Phase 1 — eia/fred daily+weekly + derived crack_321
+#   Phase 3 — eia/fred monthly, World Bank Pink Sheet, AEMO NEM daily means
+# Barchart / ember / worldsteel / TBD hubs are catalogued only.
+#
+# Series ids that overlap commodity_producers.yaml (coking_coal, gold, …)
+# keep the same id so a later join can share the Barchart CSV.
+#
+# Roles on an exposure:
+#   revenue  — product price the stock is levered to
+#   cost     — input that squeezes margin
+#   volume   — physical balance / activity (inventories, rigs, exports)
+#   basis    — quality / location / FX gap vs the benchmark
+#   macro    — regime context (dollar, real yields, credit)
+
+version: 1
+status: phase3
+
+universes:
+  energy_pilot: "Business lists/energy_pilot.csv"
+  commodity_producers: "config/commodity_producers.yaml"
+
+# Quarterly fields extracted from filings (Phase 2). Not fetchable series.
+operating_fields:
+  - id: production
+    display: Reported production
+  - id: realized_price
+    display: Realized price vs benchmark
+  - id: hedge_pct
+    display: Remaining production hedged
+  - id: unit_cost
+    display: Cash cost / AISC / netback
+    existing: unit_cost_history
+  - id: capex
+    display: Period capex / guidance
+
+# ---------------------------------------------------------------------------
+# Catalog
+# ---------------------------------------------------------------------------
+series:
+  # --- already in the Barchart daily CSV (commodity_producers.yaml) ---
+  coking_coal:
+    display: Coking coal
+    unit: USD/t
+    freq: daily
+    source: {provider: barchart_csv, id: "coking coal"}
+    license: unofficial
+  thermal_coal:
+    display: Thermal coal
+    unit: USD/t
+    freq: daily
+    source: {provider: barchart_csv, id: "thermal coal"}
+    license: unofficial
+  iron_ore:
+    display: Iron ore 62% Fe CFR
+    unit: USD/t
+    freq: daily
+    source: {provider: yfinance, id: TIO=F}
+    fallback: {provider: fred, id: PIORECRUSDM}
+    also_in: barchart_csv
+    license: public
+    notes: >
+      SGX TSI 62% Fe (Yahoo TIO=F), ~USD/dmt. Do NOT use Barchart TS*0 —
+      that root is Tokyo Topix-Mini (~4000 index points), which produced
+      fake ~99% miner margins. Pink Sheet "Iron ore, cfr spot" is the
+      monthly IMF series (FRED PIORECRUSDM).
+  aluminum:
+    display: Aluminum
+    unit: USD/t
+    freq: daily
+    source: {provider: barchart_csv, id: aluminum}
+    license: unofficial
+  copper:
+    display: Copper
+    unit: USD/lb
+    freq: daily
+    source: {provider: barchart_csv, id: copper}
+    license: unofficial
+  gold:
+    display: Gold
+    unit: USD/oz
+    freq: daily
+    source: {provider: barchart_csv, id: gold}
+    license: unofficial
+  crude_oil_wti:
+    display: Crude oil WTI
+    unit: USD/bbl
+    freq: daily
+    source: {provider: fred, id: DCOILWTICO}
+    fallback: {provider: eia, id: PET.RWTC.D}
+    also_in: barchart_csv
+    license: public
+  crude_oil_brent:
+    display: Crude oil Brent
+    unit: USD/bbl
+    freq: daily
+    source: {provider: fred, id: DCOILBRENTEU}
+    fallback: {provider: eia, id: PET.RBRTE.D}
+    also_in: barchart_csv
+    license: public
+
+  # --- official energy prices (Phase 1) ---
+  henry_hub:
+    display: Henry Hub natural gas
+    unit: USD/MMBtu
+    freq: daily
+    source: {provider: fred, id: DHHNGSP}
+    fallback: {provider: eia, id: NG.RNGWHHD.D}
+    backup: {provider: yfinance, id: NG=F}
+    license: public
+    notes: Highest-leverage missing strip vs energy_pilot.
+  rbob_gasoline:
+    display: NY Harbor conventional gasoline
+    unit: USD/gal
+    freq: daily
+    source: {provider: fred, id: DGASNYH}
+    fallback: {provider: eia, id: PET.EER_EPMRU_PF4_Y35NY_DPG.D}
+    backup: {provider: yfinance, id: RB=F}
+    license: public
+    notes: NY Harbor regular spot (FRED DGASNYH). EIA RBOB seriesid is not on v2; close enough for 3-2-1.
+  ulsd_heating_oil:
+    display: NY Harbor ULSD / heating oil
+    unit: USD/gal
+    freq: daily
+    source: {provider: fred, id: DHOILNYH}
+    backup: {provider: yfinance, id: HO=F}
+    license: public
+  crack_321:
+    display: 3-2-1 crack spread
+    unit: USD/bbl
+    freq: daily
+    source: {provider: derived, id: crack_321}
+    inputs: [crude_oil_wti, rbob_gasoline, ulsd_heating_oil]
+    license: derived
+    notes: "2*RBOB + 1*ULSD − 3*WTI after gal→bbl (*42)."
+
+  # --- monthly official (Pink Sheet / FRED) ---
+  uranium_u3o8:
+    display: Uranium U3O8
+    unit: USD/lb
+    freq: monthly
+    source: {provider: fred, id: PURANUSDM}
+    fallback: {provider: cameco, id: month_end_spot}
+    license: public
+    notes: Weekly UxC/TradeTech is paid. Cameco posts month-end averages.
+  newcastle_coal:
+    display: Newcastle thermal coal
+    unit: USD/t
+    freq: monthly
+    source: {provider: worldbank, id: COAL_AUS}
+    license: public
+    notes: Closer to ASX thermal realizations than the Barchart daily future.
+  lng_japan:
+    display: Japan LNG (JKM-like monthly)
+    unit: USD/MMBtu
+    freq: monthly
+    source: {provider: worldbank, id: LNG_JPN}
+    license: public
+    notes: Daily JKM/TTF is mostly paid. Prefer this + eia_lng_exports.
+  alumina:
+    display: Alumina
+    unit: USD/t
+    freq: monthly
+    source: {provider: worldbank, id: ALUMINA}
+    license: public
+    fetch: false
+    notes: Pink Sheet monthly Excel (Aug 2026) has Aluminum, not Alumina. Do not substitute.
+  lithium_carbonate:
+    display: Lithium carbonate
+    unit: USD/t
+    freq: monthly
+    source: {provider: worldbank, id: LITHIUM_CARB}
+    license: public
+    fetch: false
+    notes: >
+      Pink Sheet monthly Excel (Aug 2026) has no lithium column. Fastmarkets
+      daily is paid. Producers still list; the strip stays empty until a public
+      series exists. PLS unit costs are spodumene FOB SC6, not LCE.
+
+  # --- FX / rates / credit ---
+  fx_audusd:
+    display: USD per AUD
+    unit: USD/AUD
+    freq: daily
+    source: {provider: fred, id: DEXUSAL}
+    license: public
+  fx_jpyusd:
+    display: JPY per USD
+    unit: JPY/USD
+    freq: daily
+    source: {provider: fred, id: DEXJPUS}
+    license: public
+  fx_krwusd:
+    display: KRW per USD
+    unit: KRW/USD
+    freq: daily
+    source: {provider: fred, id: DEXKOUS}
+    license: public
+  fx_inrusd:
+    display: INR per USD
+    unit: INR/USD
+    freq: daily
+    source: {provider: fred, id: DEXINUS}
+    license: public
+  dxy:
+    display: Trade-weighted USD (broad)
+    unit: index
+    freq: daily
+    source: {provider: fred, id: DTWEXBGS}
+    license: public
+  tips_10y:
+    display: 10-year TIPS real yield
+    unit: pct
+    freq: daily
+    source: {provider: fred, id: DFII10}
+    license: public
+  hy_oas:
+    display: ICE BofA US HY OAS
+    unit: pct
+    freq: daily
+    source: {provider: fred, id: BAMLH0A0HYM2}
+    license: public
+
+  # --- physical balances (Phase 1) ---
+  eia_crude_stocks:
+    display: US crude stocks excl. SPR
+    unit: mbbl
+    freq: weekly
+    source: {provider: eia, id: PET.WCESTUS1.W}
+    license: public
+  eia_cushing_stocks:
+    display: Cushing crude stocks
+    unit: mbbl
+    freq: weekly
+    source: {provider: eia, id: PET.W_EPC0_SAX_YCUOK_MBBL.W}
+    license: public
+  eia_gas_storage:
+    display: Lower-48 working gas in storage
+    unit: Bcf
+    freq: weekly
+    source: {provider: eia, id: NG.NW2_EPG0_SWO_R48_BCF.W}
+    license: public
+  eia_lng_exports:
+    display: US LNG exports
+    unit: Bcf/d
+    freq: monthly
+    source: {provider: eia, id: NG.N9133US2.M}
+    transform: mmcf_month_to_bcfd
+    license: public
+    notes: EIA v2 is monthly MMCF; stored as Bcf/d (MMCF / days / 1000).
+  eia_us_oil_production:
+    display: US crude field production
+    unit: mbbl/d
+    freq: weekly
+    source: {provider: eia, id: PET.WCRFPUS2.W}
+    license: public
+  eia_us_gas_production:
+    display: US dry natural gas production
+    unit: Bcf/d
+    freq: monthly
+    source: {provider: eia, id: NG.N9070US2.M}
+    transform: mmcf_month_to_bcfd
+    license: public
+    notes: EIA v2 is monthly MMCF; stored as Bcf/d (MMCF / days / 1000).
+  eia_refinery_util:
+    display: US refinery utilization
+    unit: pct
+    freq: weekly
+    source: {provider: eia, id: PET.WPULEUS3.W}
+    license: public
+  bh_oil_rigs:
+    display: US oil rotary rigs (Baker Hughes)
+    unit: count
+    freq: weekly
+    source: {provider: eia, id: E_ERTRRO_XR0_NUS_C, route: petroleum/crd/drill}
+    fallback: {provider: bakerhughes, id: oil}
+    license: public
+    notes: >
+      EIA petroleum/crd/drill monthly stopped after 2026-02. Fallback is the
+      weekly Baker Hughes count republished by AOGR.
+  bh_gas_rigs:
+    display: US gas rotary rigs (Baker Hughes)
+    unit: count
+    freq: weekly
+    source: {provider: eia, id: E_ERTRRG_XR0_NUS_C, route: petroleum/crd/drill}
+    fallback: {provider: bakerhughes, id: gas}
+    license: public
+
+  # --- weather / power / policy (Phase 3; catalogued so clusters can point at them) ---
+  hdd_us:
+    display: US population-weighted HDD
+    unit: degree-days
+    freq: monthly
+    source: {provider: eia, id: STEO.ZWHDPUS.M}
+    transform: drop_future
+    license: public
+    notes: EIA STEO ZWHDPUS. FRED HTDD000US is gone.
+  cdd_us:
+    display: US population-weighted CDD
+    unit: degree-days
+    freq: monthly
+    source: {provider: eia, id: STEO.ZWCDPUS.M}
+    transform: drop_future
+    license: public
+    notes: EIA STEO ZWCDPUS. FRED CLDD000US is gone.
+  aemo_nsw_price:
+    display: AEMO NEM NSW regional price
+    unit: AUD/MWh
+    freq: daily
+    source: {provider: aemo, id: NSW1}
+    license: public
+    notes: Daily mean of aggregated 5-min / 30-min regional price.
+  aemo_qld_price:
+    display: AEMO NEM QLD regional price
+    unit: AUD/MWh
+    freq: daily
+    source: {provider: aemo, id: QLD1}
+    license: public
+  aemo_vic_price:
+    display: AEMO NEM VIC regional price
+    unit: AUD/MWh
+    freq: daily
+    source: {provider: aemo, id: VIC1}
+    license: public
+  us_wholesale_power:
+    display: US wholesale power (hub TBD)
+    unit: USD/MWh
+    freq: daily
+    source: {provider: eia, id: TBD_ERCOT_OR_PJM}
+    license: public
+    notes: Pin ERCOT North / PJM West when Phase 3 is wired. Do not ingest full nodal.
+  eu_ets:
+    display: EU ETS carbon
+    unit: EUR/t
+    freq: daily
+    source: {provider: ember, id: eu_ets}
+    license: public
+  china_steel:
+    display: China crude steel output
+    unit: Mt
+    freq: monthly
+    source: {provider: worldsteel, id: china_crude_steel}
+    license: public
+
+# ---------------------------------------------------------------------------
+# Cluster defaults (tickers inherit primary + series + operating)
+# ---------------------------------------------------------------------------
+clusters:
+  oily_ep:
+    display: Oily E&P
+    primary: crude_oil_wti
+    series:
+      - {id: crude_oil_wti, role: revenue}
+      - {id: crude_oil_brent, role: revenue}
+      - {id: henry_hub, role: revenue}
+      - {id: eia_crude_stocks, role: volume}
+      - {id: eia_cushing_stocks, role: volume}
+      - {id: eia_us_oil_production, role: volume}
+      - {id: bh_oil_rigs, role: volume}
+      - {id: hy_oas, role: macro}
+    operating: [production, realized_price, hedge_pct, unit_cost, capex]
+
+  gassy_ep:
+    display: Gassy E&P
+    primary: henry_hub
+    series:
+      - {id: henry_hub, role: revenue}
+      - {id: eia_gas_storage, role: volume}
+      - {id: eia_lng_exports, role: volume}
+      - {id: eia_us_gas_production, role: volume}
+      - {id: bh_gas_rigs, role: volume}
+      - {id: hdd_us, role: volume}
+      - {id: cdd_us, role: volume}
+    operating: [production, realized_price, hedge_pct, unit_cost, capex]
+
+  majors:
+    display: Integrated majors
+    primary: crude_oil_brent
+    series:
+      - {id: crude_oil_brent, role: revenue}
+      - {id: crude_oil_wti, role: revenue}
+      - {id: henry_hub, role: revenue}
+      - {id: crack_321, role: revenue}
+      - {id: eia_lng_exports, role: volume}
+      - {id: eia_refinery_util, role: volume}
+      - {id: eia_crude_stocks, role: volume}
+    operating: [production, realized_price, unit_cost, capex]
+
+  midstream_us:
+    display: US midstream
+    primary: henry_hub
+    series:
+      - {id: henry_hub, role: volume}
+      - {id: crude_oil_wti, role: volume}
+      - {id: eia_us_gas_production, role: volume}
+      - {id: eia_us_oil_production, role: volume}
+      - {id: eia_lng_exports, role: volume}
+    operating: [production, capex]
+    notes: Volumes matter more than the strip.
+
+  drillers:
+    display: Offshore drillers
+    primary: crude_oil_wti
+    series:
+      - {id: crude_oil_wti, role: revenue}
+      - {id: bh_oil_rigs, role: volume}
+    operating: [production, capex]
+    notes: Dayrates are mostly paid (Clarksons) — not catalogued.
+
+  coal_met:
+    display: Metallurgical coal
+    primary: coking_coal
+    series:
+      - {id: coking_coal, role: revenue}
+      - {id: china_steel, role: volume}
+      - {id: eu_ets, role: macro}
+    operating: [production, realized_price, unit_cost, capex]
+
+  coal_thermal_us:
+    display: US thermal coal
+    primary: thermal_coal
+    series:
+      - {id: thermal_coal, role: revenue}
+      - {id: coking_coal, role: revenue}
+      - {id: henry_hub, role: cost}
+      - {id: us_wholesale_power, role: revenue}
+      - {id: eu_ets, role: macro}
+    operating: [production, realized_price, unit_cost, capex]
+
+  coal_asx:
+    display: ASX coal
+    primary: coking_coal
+    series:
+      - {id: coking_coal, role: revenue}
+      - {id: thermal_coal, role: revenue}
+      - {id: newcastle_coal, role: revenue}
+      - {id: fx_audusd, role: basis}
+      - {id: china_steel, role: volume}
+      - {id: eu_ets, role: macro}
+    operating: [production, realized_price, unit_cost, capex]
+
+  chemicals_energy:
+    display: Energy-intensive chemicals
+    primary: henry_hub
+    series:
+      - {id: henry_hub, role: cost}
+      - {id: us_wholesale_power, role: cost}
+      - {id: crude_oil_wti, role: cost}
+    operating: [production, unit_cost, capex]
+    notes: OLN is chlor-alkali; gas/power are costs, not the product.
+
+  power_oem:
+    display: Power equipment OEM
+    primary: us_wholesale_power
+    series:
+      - {id: us_wholesale_power, role: macro}
+      - {id: henry_hub, role: macro}
+      - {id: uranium_u3o8, role: macro}
+    operating: [capex]
+    notes: Weak commodity link — demand for turbines/reactors, not a strip.
+
+  us_ipp:
+    display: US independent power
+    primary: us_wholesale_power
+    series:
+      - {id: us_wholesale_power, role: revenue}
+      - {id: henry_hub, role: cost}
+      - {id: uranium_u3o8, role: cost}
+      - {id: eia_gas_storage, role: volume}
+      - {id: hdd_us, role: volume}
+      - {id: cdd_us, role: volume}
+    operating: [production, realized_price, unit_cost, capex]
+
+  asx_lng_oil:
+    display: ASX LNG / oil
+    primary: crude_oil_brent
+    series:
+      - {id: crude_oil_brent, role: revenue}
+      - {id: lng_japan, role: revenue}
+      - {id: eia_lng_exports, role: volume}
+      - {id: fx_audusd, role: basis}
+    operating: [production, realized_price, hedge_pct, unit_cost, capex]
+
+  asx_oil:
+    display: ASX oil E&P
+    primary: crude_oil_brent
+    series:
+      - {id: crude_oil_brent, role: revenue}
+      - {id: crude_oil_wti, role: revenue}
+      - {id: fx_audusd, role: basis}
+    operating: [production, realized_price, hedge_pct, unit_cost, capex]
+
+  asx_utility:
+    display: ASX integrated utility
+    primary: aemo_nsw_price
+    series:
+      - {id: aemo_nsw_price, role: revenue}
+      - {id: aemo_qld_price, role: revenue}
+      - {id: aemo_vic_price, role: revenue}
+      - {id: thermal_coal, role: cost}
+      - {id: lng_japan, role: cost}
+      - {id: fx_audusd, role: basis}
+    operating: [production, unit_cost, capex]
+
+  asx_midstream:
+    display: ASX pipelines / midstream
+    primary: aemo_vic_price
+    series:
+      - {id: aemo_vic_price, role: volume}
+      - {id: aemo_nsw_price, role: volume}
+      - {id: lng_japan, role: macro}
+      - {id: fx_audusd, role: basis}
+    operating: [capex]
+
+  asx_bulk_miner:
+    display: ASX bulk / diversified miner
+    primary: iron_ore
+    series:
+      - {id: iron_ore, role: revenue}
+      - {id: fx_audusd, role: basis}
+      - {id: china_steel, role: volume}
+      - {id: dxy, role: macro}
+    operating: [production, realized_price, unit_cost, capex]
+    notes: MIN.AX also has lithium — Pink Sheet monthly lithium_carbonate if present.
+
+  uranium:
+    display: Uranium miner
+    primary: uranium_u3o8
+    series:
+      - {id: uranium_u3o8, role: revenue}
+    operating: [production, realized_price, unit_cost, capex]
+
+  japan_ep:
+    display: Japan upstream
+    primary: crude_oil_brent
+    series:
+      - {id: crude_oil_brent, role: revenue}
+      - {id: lng_japan, role: revenue}
+      - {id: fx_jpyusd, role: basis}
+    operating: [production, realized_price, unit_cost, capex]
+
+  japan_refiner:
+    display: Japan refiner
+    primary: crude_oil_brent
+    series:
+      - {id: crude_oil_brent, role: cost}
+      - {id: crack_321, role: revenue}
+      - {id: lng_japan, role: cost}
+      - {id: fx_jpyusd, role: basis}
+    operating: [production, unit_cost, capex]
+
+  japan_gas:
+    display: Japan city gas
+    primary: lng_japan
+    series:
+      - {id: lng_japan, role: cost}
+      - {id: crude_oil_brent, role: cost}
+      - {id: fx_jpyusd, role: basis}
+    operating: [production, unit_cost, capex]
+
+  japan_power:
+    display: Japan electric utility
+    primary: lng_japan
+    series:
+      - {id: lng_japan, role: cost}
+      - {id: thermal_coal, role: cost}
+      - {id: uranium_u3o8, role: cost}
+      - {id: fx_jpyusd, role: basis}
+    operating: [production, unit_cost, capex]
+
+  korea_refiner:
+    display: Korea refiner
+    primary: crude_oil_brent
+    series:
+      - {id: crude_oil_brent, role: cost}
+      - {id: crack_321, role: revenue}
+      - {id: lng_japan, role: cost}
+      - {id: fx_krwusd, role: basis}
+    operating: [production, unit_cost, capex]
+
+  korea_utility:
+    display: Korea gas / power
+    primary: lng_japan
+    series:
+      - {id: lng_japan, role: cost}
+      - {id: crude_oil_brent, role: cost}
+      - {id: uranium_u3o8, role: cost}
+      - {id: fx_krwusd, role: basis}
+    operating: [production, unit_cost, capex]
+
+  india_power_exchange:
+    display: India power exchange
+    primary: crude_oil_brent
+    series:
+      - {id: crude_oil_brent, role: macro}
+      - {id: thermal_coal, role: macro}
+      - {id: fx_inrusd, role: basis}
+    operating: []
+    notes: IEX session prices are public on IEX but not catalogued as a fetch yet.
+
+  gold_miner:
+    display: Gold miner
+    primary: gold
+    series:
+      - {id: gold, role: revenue}
+      - {id: tips_10y, role: macro}
+      - {id: dxy, role: macro}
+    operating: [production, realized_price, unit_cost, capex]
+
+  copper_miner:
+    display: Copper miner
+    primary: copper
+    series:
+      - {id: copper, role: revenue}
+      - {id: dxy, role: macro}
+      - {id: china_steel, role: volume}
+    operating: [production, realized_price, unit_cost, capex]
+
+  aluminum:
+    display: Aluminum
+    primary: aluminum
+    series:
+      - {id: aluminum, role: revenue}
+      - {id: alumina, role: cost}
+      - {id: henry_hub, role: cost}
+      - {id: us_wholesale_power, role: cost}
+    operating: [production, realized_price, unit_cost, capex]
+
+# ---------------------------------------------------------------------------
+# Tickers — inherit cluster; override primary / extra_series when needed
+# ---------------------------------------------------------------------------
+exposures:
+  # --- energy_pilot — US oily E&P ---
+  - ticker: OXY
+    name: Occidental Petroleum
+    cluster: oily_ep
+    universe: [energy_pilot]
+  - ticker: DVN
+    name: Devon Energy
+    cluster: oily_ep
+    universe: [energy_pilot]
+  - ticker: FANG
+    name: Diamondback Energy
+    cluster: oily_ep
+    universe: [energy_pilot]
+  - ticker: EOG
+    name: EOG Resources
+    cluster: oily_ep
+    universe: [energy_pilot]
+  - ticker: COP
+    name: ConocoPhillips
+    cluster: oily_ep
+    universe: [energy_pilot]
+    extra_series:
+      - {id: eia_lng_exports, role: volume}
+      - {id: lng_japan, role: revenue}
+  - ticker: OVV
+    name: Ovintiv
+    cluster: oily_ep
+    universe: [energy_pilot]
+    notes: Oil/gas mix — keep HH from the oily_ep default.
+  - ticker: MGY
+    name: Magnolia Oil & Gas
+    cluster: oily_ep
+    universe: [energy_pilot]
+  - ticker: BTE
+    name: Baytex Energy
+    cluster: oily_ep
+    universe: [energy_pilot]
+    notes: Canadian heavy — WCS differential not catalogued (no clean public daily).
+
+  # --- energy_pilot — US gassy E&P ---
+  - ticker: CNX
+    name: CNX Resources
+    cluster: gassy_ep
+    universe: [energy_pilot]
+  - ticker: EQT
+    name: EQT
+    cluster: gassy_ep
+    universe: [energy_pilot]
+  - ticker: RRC
+    name: Range Resources
+    cluster: gassy_ep
+    universe: [energy_pilot]
+  - ticker: AR
+    name: Antero Resources
+    cluster: gassy_ep
+    universe: [energy_pilot]
+    extra_series:
+      - {id: eia_lng_exports, role: volume}
+
+  # --- energy_pilot ∩ commodity_producers — coal ---
+  - ticker: HCC
+    name: Warrior Met Coal
+    cluster: coal_met
+    universe: [energy_pilot, commodity_producers]
+  - ticker: AMR
+    name: Alpha Metallurgical
+    cluster: coal_met
+    universe: [energy_pilot, commodity_producers]
+  - ticker: BTU
+    name: Peabody Energy
+    cluster: coal_thermal_us
+    universe: [energy_pilot, commodity_producers]
+  - ticker: ARLP
+    name: Alliance Resource Partners
+    cluster: coal_thermal_us
+    universe: [energy_pilot, commodity_producers]
+  - ticker: CNR
+    name: Core Natural Resources
+    cluster: coal_thermal_us
+    universe: [energy_pilot]
+    extra_series:
+      - {id: coking_coal, role: revenue}
+    notes: CONSOL/Arch successor — thermal + met mix.
+
+  - ticker: OLN
+    name: Olin
+    cluster: chemicals_energy
+    universe: [energy_pilot]
+
+  # --- energy_pilot — majors / midstream / drillers / power ---
+  - ticker: XOM
+    name: Exxon Mobil
+    cluster: majors
+    universe: [energy_pilot]
+  - ticker: CVX
+    name: Chevron
+    cluster: majors
+    universe: [energy_pilot]
+  - ticker: BP
+    name: BP
+    cluster: majors
+    universe: [energy_pilot]
+  - ticker: EPD
+    name: Enterprise Products
+    cluster: midstream_us
+    universe: [energy_pilot]
+  - ticker: WMB
+    name: Williams
+    cluster: midstream_us
+    universe: [energy_pilot]
+  - ticker: ET
+    name: Energy Transfer
+    cluster: midstream_us
+    universe: [energy_pilot]
+  - ticker: NE
+    name: Noble Corporation
+    cluster: drillers
+    universe: [energy_pilot]
+  - ticker: VAL
+    name: Valaris
+    cluster: drillers
+    universe: [energy_pilot]
+  - ticker: GEV
+    name: GE Vernova
+    cluster: power_oem
+    universe: [energy_pilot]
+  - ticker: CEG
+    name: Constellation Energy
+    cluster: us_ipp
+    universe: [energy_pilot]
+
+  # --- energy_pilot — ASX ---
+  - ticker: NHC.AX
+    name: New Hope
+    cluster: coal_asx
+    universe: [energy_pilot, commodity_producers]
+    primary: coking_coal
+  - ticker: WHC.AX
+    name: Whitehaven Coal
+    cluster: coal_asx
+    universe: [energy_pilot, commodity_producers]
+    primary: coking_coal
+  - ticker: YAL.AX
+    name: Yancoal
+    cluster: coal_asx
+    universe: [energy_pilot, commodity_producers]
+    primary: thermal_coal
+  - ticker: WDS.AX
+    name: Woodside Energy
+    cluster: asx_lng_oil
+    universe: [energy_pilot]
+  - ticker: STO.AX
+    name: Santos
+    cluster: asx_lng_oil
+    universe: [energy_pilot]
+  - ticker: ORG.AX
+    name: Origin Energy
+    cluster: asx_utility
+    universe: [energy_pilot]
+  - ticker: BPT.AX
+    name: Beach Energy
+    cluster: asx_oil
+    universe: [energy_pilot]
+    extra_series:
+      - {id: aemo_vic_price, role: revenue}
+      - {id: henry_hub, role: revenue}
+    notes: Cooper/Otway — oil plus east-coast gas.
+  - ticker: KAR.AX
+    name: Karoon Energy
+    cluster: asx_oil
+    universe: [energy_pilot]
+  - ticker: MIN.AX
+    name: Mineral Resources
+    cluster: asx_bulk_miner
+    universe: [energy_pilot]
+  - ticker: APA.AX
+    name: APA Group
+    cluster: asx_midstream
+    universe: [energy_pilot]
+  - ticker: AGL.AX
+    name: AGL Energy
+    cluster: asx_utility
+    universe: [energy_pilot]
+  - ticker: PDN.AX
+    name: Paladin Energy
+    cluster: uranium
+    universe: [energy_pilot]
+    extra_series:
+      - {id: fx_audusd, role: basis}
+
+  # --- energy_pilot — Japan ---
+  - ticker: 1605.T
+    name: Inpex
+    cluster: japan_ep
+    universe: [energy_pilot]
+  - ticker: 1662.T
+    name: JAPEX
+    cluster: japan_ep
+    universe: [energy_pilot]
+  - ticker: 5020.T
+    name: ENEOS Holdings
+    cluster: japan_refiner
+    universe: [energy_pilot]
+  - ticker: 5019.T
+    name: Idemitsu Kosan
+    cluster: japan_refiner
+    universe: [energy_pilot]
+  - ticker: 5021.T
+    name: Cosmo Energy
+    cluster: japan_refiner
+    universe: [energy_pilot]
+  - ticker: 9531.T
+    name: Tokyo Gas
+    cluster: japan_gas
+    universe: [energy_pilot]
+  - ticker: 9532.T
+    name: Osaka Gas
+    cluster: japan_gas
+    universe: [energy_pilot]
+  - ticker: 9503.T
+    name: Kansai Electric Power
+    cluster: japan_power
+    universe: [energy_pilot]
+  - ticker: 9513.T
+    name: J-POWER
+    cluster: japan_power
+    universe: [energy_pilot]
+
+  # --- energy_pilot — Korea / India ---
+  - ticker: 096770.KS
+    name: SK Innovation
+    cluster: korea_refiner
+    universe: [energy_pilot]
+  - ticker: 010950.KS
+    name: S-Oil
+    cluster: korea_refiner
+    universe: [energy_pilot]
+  - ticker: 015760.KS
+    name: KEPCO
+    cluster: korea_utility
+    universe: [energy_pilot]
+  - ticker: 034020.KS
+    name: Doosan Enerbility
+    cluster: power_oem
+    universe: [energy_pilot]
+    extra_series:
+      - {id: fx_krwusd, role: basis}
+  - ticker: 036460.KS
+    name: KOGAS
+    cluster: korea_utility
+    universe: [energy_pilot]
+  - ticker: IEX.NS
+    name: Indian Energy Exchange
+    cluster: india_power_exchange
+    universe: [energy_pilot]
+
+  # --- commodity_producers not already on energy_pilot ---
+  - ticker: NEM
+    name: Newmont
+    cluster: gold_miner
+    universe: [commodity_producers]
+  - ticker: NEM.AX
+    name: Newmont (ASX CDIs)
+    cluster: gold_miner
+    universe: [commodity_producers]
+    extra_series:
+      - {id: fx_audusd, role: basis}
+  - ticker: FCX
+    name: Freeport-McMoRan
+    cluster: copper_miner
+    universe: [commodity_producers]
+  - ticker: SCCO
+    name: Southern Copper
+    cluster: copper_miner
+    universe: [commodity_producers]
+  - ticker: AA
+    name: Alcoa
+    cluster: aluminum
+    universe: [commodity_producers]

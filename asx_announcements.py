@@ -18,6 +18,7 @@ Usage examples at the bottom of the file.
 """
 
 import os
+import re
 import time
 import json
 import sqlite3
@@ -123,6 +124,27 @@ def _retry_request(session: requests.Session, url: str, params: dict = None,
 
 # ====================== SQLITE CACHE LAYER ======================
 
+def _ensure_announcement_metric_columns(conn: sqlite3.Connection) -> None:
+    """Add buyback PDF metric columns when missing (safe on existing DBs)."""
+    cols = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(announcements)").fetchall()
+    }
+    migrations = [
+        ("shares_purchased", "REAL"),
+        ("shares_before", "REAL"),
+        ("price_high", "REAL"),
+        ("price_low", "REAL"),
+        ("price_avg", "REAL"),
+        ("consideration", "REAL"),
+        ("metrics_json", "TEXT"),
+        ("metrics_parsed_at", "TEXT"),
+    ]
+    for name, col_type in migrations:
+        if name not in cols:
+            conn.execute(f"ALTER TABLE announcements ADD COLUMN {name} {col_type}")
+
+
 def init_db(db_path: str = DEFAULT_DB_PATH):
     """Initialize SQLite cache tables."""
     conn = sqlite3.connect(db_path)
@@ -139,6 +161,7 @@ def init_db(db_path: str = DEFAULT_DB_PATH):
             fetched_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    _ensure_announcement_metric_columns(conn)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_ticker_date ON announcements(ticker, date);
     """)
@@ -186,7 +209,7 @@ def _known_document_keys(db_path: str = DEFAULT_DB_PATH) -> set:
 
 
 def save_announcements_to_db(announcements: List[Dict], db_path: str = DEFAULT_DB_PATH):
-    """Upsert announcements into SQLite."""
+    """Upsert announcements into SQLite (preserves existing buyback metrics when omitted)."""
     if not announcements:
         return
     init_db(db_path)
@@ -194,22 +217,110 @@ def save_announcements_to_db(announcements: List[Dict], db_path: str = DEFAULT_D
     cur = conn.cursor()
 
     for ann in announcements:
-        cur.execute("""
-            INSERT OR REPLACE INTO announcements
-            (document_key, ticker, date, headline, url, is_price_sensitive, classification, raw_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            ann.get("document_key"),
-            ann.get("ticker"),
-            ann.get("date"),
-            ann.get("headline"),
-            ann.get("url"),
-            int(ann.get("is_price_sensitive", False)),
-            ann.get("classification", "other"),
-            json.dumps(ann.get("raw", {}))
-        ))
+        metrics = ann.get("metrics") or {}
+        shares_purchased = ann.get("shares_purchased", metrics.get("shares_purchased"))
+        shares_before = ann.get("shares_before", metrics.get("shares_before"))
+        price_high = ann.get("price_high", metrics.get("price_high"))
+        price_low = ann.get("price_low", metrics.get("price_low"))
+        price_avg = ann.get("price_avg", metrics.get("price_avg") or metrics.get("price"))
+        consideration = ann.get("consideration", metrics.get("consideration"))
+        metrics_json = ann.get("metrics_json")
+        if metrics_json is None and metrics:
+            metrics_json = json.dumps(metrics)
+        metrics_parsed_at = ann.get("metrics_parsed_at")
+        if metrics_parsed_at is None and metrics:
+            metrics_parsed_at = datetime.now().isoformat()
+
+        cur.execute(
+            """
+            INSERT INTO announcements (
+                document_key, ticker, date, headline, url, is_price_sensitive,
+                classification, raw_json,
+                shares_purchased, shares_before, price_high, price_low, price_avg,
+                consideration, metrics_json, metrics_parsed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(document_key) DO UPDATE SET
+                ticker=excluded.ticker,
+                date=excluded.date,
+                headline=excluded.headline,
+                url=excluded.url,
+                is_price_sensitive=excluded.is_price_sensitive,
+                classification=excluded.classification,
+                raw_json=excluded.raw_json,
+                shares_purchased=COALESCE(excluded.shares_purchased, announcements.shares_purchased),
+                shares_before=COALESCE(excluded.shares_before, announcements.shares_before),
+                price_high=COALESCE(excluded.price_high, announcements.price_high),
+                price_low=COALESCE(excluded.price_low, announcements.price_low),
+                price_avg=COALESCE(excluded.price_avg, announcements.price_avg),
+                consideration=COALESCE(excluded.consideration, announcements.consideration),
+                metrics_json=COALESCE(excluded.metrics_json, announcements.metrics_json),
+                metrics_parsed_at=COALESCE(excluded.metrics_parsed_at, announcements.metrics_parsed_at)
+            """,
+            (
+                ann.get("document_key"),
+                ann.get("ticker"),
+                ann.get("date"),
+                ann.get("headline"),
+                ann.get("url"),
+                int(ann.get("is_price_sensitive", False)),
+                ann.get("classification", "other"),
+                json.dumps(ann.get("raw", {})),
+                shares_purchased,
+                shares_before,
+                price_high,
+                price_low,
+                price_avg,
+                consideration,
+                metrics_json,
+                metrics_parsed_at,
+            ),
+        )
     conn.commit()
     conn.close()
+
+
+_ANN_SELECT_COLS = (
+    "document_key, ticker, date, headline, url, is_price_sensitive, classification, raw_json, "
+    "shares_purchased, shares_before, price_high, price_low, price_avg, consideration, "
+    "metrics_json, metrics_parsed_at"
+)
+
+
+def _announcement_from_db_row(row) -> Dict:
+    metrics = {}
+    if len(row) > 14 and row[14]:
+        try:
+            metrics = json.loads(row[14]) or {}
+        except Exception:
+            metrics = {}
+    ann = {
+        "document_key": row[0],
+        "ticker": row[1],
+        "date": row[2],
+        "headline": row[3],
+        "url": row[4],
+        "is_price_sensitive": bool(row[5]),
+        "classification": row[6],
+        "raw": json.loads(row[7]) if row[7] else {},
+    }
+    if len(row) > 8:
+        ann["shares_purchased"] = row[8]
+        ann["shares_before"] = row[9]
+        ann["price_high"] = row[10]
+        ann["price_low"] = row[11]
+        ann["price_avg"] = row[12]
+        ann["consideration"] = row[13]
+        ann["metrics"] = metrics
+        ann["metrics_json"] = row[14]
+        ann["metrics_parsed_at"] = row[15] if len(row) > 15 else None
+        # Prefer DB columns over metrics blob for signal fields
+        if ann["shares_purchased"] is not None:
+            metrics.setdefault("shares_purchased", ann["shares_purchased"])
+        if ann["price_avg"] is not None:
+            metrics.setdefault("price", ann["price_avg"])
+        elif ann["price_high"] is not None:
+            metrics.setdefault("price", ann["price_high"])
+    return ann
 
 
 def load_cached_announcements(tickers: List[str] = None, days: int = 90,
@@ -219,8 +330,8 @@ def load_cached_announcements(tickers: List[str] = None, days: int = 90,
     conn = sqlite3.connect(db_path)
     since = (datetime.now() - timedelta(days=days)).date().isoformat()
 
-    query = """
-        SELECT document_key, ticker, date, headline, url, is_price_sensitive, classification, raw_json
+    query = f"""
+        SELECT {_ANN_SELECT_COLS}
         FROM announcements
         WHERE date >= ?
     """
@@ -233,20 +344,7 @@ def load_cached_announcements(tickers: List[str] = None, days: int = 90,
 
     rows = conn.execute(query, params).fetchall()
     conn.close()
-
-    results = []
-    for row in rows:
-        results.append({
-            "document_key": row[0],
-            "ticker": row[1],
-            "date": row[2],
-            "headline": row[3],
-            "url": row[4],
-            "is_price_sensitive": bool(row[5]),
-            "classification": row[6],
-            "raw": json.loads(row[7]) if row[7] else {}
-        })
-    return results
+    return [_announcement_from_db_row(row) for row in rows]
 
 
 # ====================== CORE FETCHING ======================
@@ -366,19 +464,6 @@ def _headline_classify(headline: str) -> str:
     if any(kw in h for kw in DIRECTOR_INSIDER_KEYWORDS):
         return "insider"
     return "other"
-
-
-def _announcement_from_db_row(row) -> Dict:
-    return {
-        "document_key": row[0],
-        "ticker": row[1],
-        "date": row[2],
-        "headline": row[3],
-        "url": row[4],
-        "is_price_sensitive": bool(row[5]),
-        "classification": row[6],
-        "raw": json.loads(row[7]) if row[7] else {},
-    }
 
 
 def _classify_item(item: dict) -> str:
@@ -550,8 +635,8 @@ def load_relevant_announcements_from_db(
     conn = sqlite3.connect(db_path)
     since = (datetime.now() - timedelta(days=days)).date().isoformat()
     rows = conn.execute(
-        """
-        SELECT document_key, ticker, date, headline, url, is_price_sensitive, classification, raw_json
+        f"""
+        SELECT {_ANN_SELECT_COLS}
         FROM announcements
         WHERE date >= ?
           AND classification IN ('insider', 'insider_purchase', 'insider_sale', 'buyback')
@@ -591,7 +676,12 @@ def fetch_market_announcements(
 
 # ====================== PDF TEXT EXTRACTION (Feature 1) ======================
 
-def _download_and_extract_pdf_text(url: str, session: requests.Session, max_pages: int = 3) -> str:
+def _download_and_extract_pdf_text(
+    url: str,
+    session: requests.Session,
+    max_pages: int = 3,
+    lowercase: bool = True,
+) -> str:
     """Download PDF and extract text using pypdf."""
     if PdfReader is None:
         logger.warning("pypdf not installed. Skipping PDF text extraction.")
@@ -605,10 +695,170 @@ def _download_and_extract_pdf_text(url: str, session: requests.Session, max_page
         text = ""
         for i, page in enumerate(reader.pages[:max_pages]):
             text += page.extract_text() or ""
-        return text.lower()
+        return text.lower() if lowercase else text
     except Exception as e:
         logger.debug(f"PDF extraction failed: {e}")
         return ""
+
+
+def _parse_numeric_token(raw: str) -> Optional[float]:
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    s = re.sub(r"^(AUD|USD|US\$|A\$|\$)\s*", "", s, flags=re.I)
+    s = s.replace(",", "").replace(" ", "")
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def parse_buyback_pdf_metrics(text: str) -> Dict[str, Any]:
+    """
+    Extract shares / price / consideration from ASX buy-back PDFs.
+
+    Supports:
+    - Modern Appendix 3C daily buy-back notification (Part 4)
+    - Legacy Appendix 3E daily share buy-back notice
+    """
+    if not text:
+        return {}
+
+    flat = re.sub(r"\s+", " ", text)
+    out: Dict[str, Any] = {}
+
+    # --- Shares: previous-day vs cumulative before previous day ---
+    m = re.search(
+        r"(?:total number of \+?securities |number of shares(?:\s*/\s*units)?\s*)"
+        r"bought back on previous day\s*([0-9][0-9,]*)",
+        flat,
+        re.I,
+    )
+    if m:
+        out["shares_purchased"] = _parse_numeric_token(m.group(1))
+
+    m = re.search(
+        r"(?:total number of \+?securities |number of shares(?:\s*/\s*units)?\s*)"
+        r"bought back before previous day\s*([0-9][0-9,]*)",
+        flat,
+        re.I,
+    )
+    if m:
+        out["shares_before"] = _parse_numeric_token(m.group(1))
+
+    # Part 4.3 / 3E table: two columns "Before previous day | On previous day"
+    m = re.search(
+        r"4\.3\s*\*?Total number of \+?securities bought back[^\d]{0,120}"
+        r"([0-9][0-9,]*)\s+([0-9][0-9,]*)",
+        flat,
+        re.I,
+    )
+    if m:
+        out.setdefault("shares_before", _parse_numeric_token(m.group(1)))
+        out.setdefault("shares_purchased", _parse_numeric_token(m.group(2)))
+
+    # Legacy Appendix 3E single-day style
+    if out.get("shares_purchased") is None:
+        m = re.search(
+            r"Number of shares\s*/?\s*units bought back[^\d]{0,40}([0-9][0-9,]*)",
+            flat,
+            re.I,
+        )
+        if m:
+            out["shares_purchased"] = _parse_numeric_token(m.group(1))
+
+    # --- Consideration: before | previous day ---
+    m = re.search(
+        r"(?:4\.4\s*\*?)?Total consideration paid or payable for the \+?securities\s*"
+        r"(?:AUD|USD|US\$|A\$|\$)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*"
+        r"(?:AUD|USD|US\$|A\$|\$)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)?",
+        flat,
+        re.I,
+    )
+    if m:
+        before = _parse_numeric_token(m.group(1))
+        day = _parse_numeric_token(m.group(2)) if m.group(2) else None
+        if day is not None:
+            out["consideration_before"] = before
+            out["consideration"] = day
+        elif before is not None:
+            out["consideration"] = before
+
+    # --- High / low price: often "Highest price paid AUD x.xx AUD y.yy" ---
+    m = re.search(
+        r"Highest price paid\s*(?:AUD|USD|US\$|A\$|\$)?\s*([0-9]+\.[0-9]+)\s*"
+        r"(?:AUD|USD|US\$|A\$|\$)?\s*([0-9]+\.[0-9]+)?",
+        flat,
+        re.I,
+    )
+    if m:
+        first = _parse_numeric_token(m.group(1))
+        second = _parse_numeric_token(m.group(2)) if m.group(2) else None
+        if second is not None:
+            out["price_high_before"] = first
+            out["price_high"] = second
+        else:
+            out["price_high"] = first
+
+    m = re.search(
+        r"Lowest price paid\s*(?:AUD|USD|US\$|A\$|\$)?\s*([0-9]+\.[0-9]+)\s*"
+        r"(?:AUD|USD|US\$|A\$|\$)?\s*([0-9]+\.[0-9]+)?",
+        flat,
+        re.I,
+    )
+    if m:
+        first = _parse_numeric_token(m.group(1))
+        second = _parse_numeric_token(m.group(2)) if m.group(2) else None
+        if second is not None:
+            out["price_low_before"] = first
+            out["price_low"] = second
+        else:
+            out["price_low"] = first
+
+    # Derived average price for the day
+    shares = out.get("shares_purchased")
+    consideration = out.get("consideration")
+    if shares and shares > 0 and consideration and consideration > 0:
+        out["price_avg"] = round(consideration / shares, 4)
+    elif out.get("price_high") is not None and out.get("price_low") is not None:
+        out["price_avg"] = round((out["price_high"] + out["price_low"]) / 2, 4)
+    elif out.get("price_high") is not None:
+        out["price_avg"] = out["price_high"]
+
+    if out.get("price_avg") is not None:
+        out["price"] = out["price_avg"]
+
+    # Drop empty keys
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def extract_buyback_metrics_from_pdf(
+    ann: Dict,
+    session: requests.Session,
+    max_pages: int = 6,
+) -> Dict[str, Any]:
+    """Download buy-back PDF and parse shares/price metrics."""
+    if not ann.get("url"):
+        return {}
+    text = _download_and_extract_pdf_text(
+        ann["url"], session, max_pages=max_pages, lowercase=False
+    )
+    if not text:
+        return {}
+    metrics = parse_buyback_pdf_metrics(text)
+    if metrics:
+        ann["metrics"] = metrics
+        ann["shares_purchased"] = metrics.get("shares_purchased")
+        ann["shares_before"] = metrics.get("shares_before")
+        ann["price_high"] = metrics.get("price_high")
+        ann["price_low"] = metrics.get("price_low")
+        ann["price_avg"] = metrics.get("price_avg") or metrics.get("price")
+        ann["consideration"] = metrics.get("consideration")
+        ann["metrics_json"] = json.dumps(metrics)
+        ann["metrics_parsed_at"] = datetime.now().isoformat()
+    return metrics
 
 
 def _refine_with_pdf(ann: Dict, session: requests.Session) -> str:
@@ -627,8 +877,15 @@ def _refine_with_pdf(ann: Dict, session: requests.Session) -> str:
         "insider" in ann.get("classification", "")
         or any(k in headline_l for k in DIRECTOR_INSIDER_KEYWORDS)
     )
+    is_buyback = "buyback" in (ann.get("classification") or "")
 
-    text = _download_and_extract_pdf_text(ann["url"], session)
+    # Buybacks need full Part 4 pages for prices; insiders usually fit in 3 pages
+    text = _download_and_extract_pdf_text(
+        ann["url"],
+        session,
+        max_pages=6 if is_buyback else 3,
+        lowercase=True,
+    )
 
     if not text:
         if is_insider:
@@ -645,7 +902,19 @@ def _refine_with_pdf(ann: Dict, session: requests.Session) -> str:
             return "insider_sale"
         return _headline_refine_insider(headline)
 
-    if "buyback" in ann.get("classification", ""):
+    if is_buyback:
+        # Parse metrics from original-case text when possible
+        metrics = parse_buyback_pdf_metrics(text)
+        if metrics:
+            ann["metrics"] = metrics
+            ann["shares_purchased"] = metrics.get("shares_purchased")
+            ann["shares_before"] = metrics.get("shares_before")
+            ann["price_high"] = metrics.get("price_high")
+            ann["price_low"] = metrics.get("price_low")
+            ann["price_avg"] = metrics.get("price_avg") or metrics.get("price")
+            ann["consideration"] = metrics.get("consideration")
+            ann["metrics_json"] = json.dumps(metrics)
+            ann["metrics_parsed_at"] = datetime.now().isoformat()
         return "buyback"
 
     return ann.get("classification", "other")
@@ -684,13 +953,26 @@ def get_relevant_signals(
             t = ann["ticker"]
             if t not in signals:
                 signals[t] = []
-            signals[t].append({
+            sig = {
                 "date": ann["date"],
                 "type": "insider" if "insider" in classification else "buyback",
                 "headline": ann["headline"],
                 "url": ann["url"],
-                "classification": classification
-            })
+                "classification": classification,
+            }
+            if classification == "buyback":
+                if ann.get("shares_purchased") is not None:
+                    sig["shares"] = ann.get("shares_purchased")
+                price = ann.get("price_avg") or ann.get("price_high")
+                if price is not None:
+                    sig["price"] = price
+                if ann.get("price_high") is not None:
+                    sig["price_high"] = ann.get("price_high")
+                if ann.get("price_low") is not None:
+                    sig["price_low"] = ann.get("price_low")
+                if ann.get("consideration") is not None:
+                    sig["consideration"] = ann.get("consideration")
+            signals[t].append(sig)
 
     # Sort newest first
     for t in signals:
@@ -734,13 +1016,26 @@ def get_relevant_market_signals(
             continue
         if t not in signals:
             signals[t] = []
-        signals[t].append({
+        sig = {
             "date": ann["date"],
             "type": sig_type,
             "headline": ann["headline"],
             "url": ann.get("url"),
             "classification": classification,
-        })
+        }
+        if sig_type == "buyback":
+            if ann.get("shares_purchased") is not None:
+                sig["shares"] = ann.get("shares_purchased")
+            price = ann.get("price_avg") or ann.get("price_high")
+            if price is not None:
+                sig["price"] = price
+            if ann.get("price_high") is not None:
+                sig["price_high"] = ann.get("price_high")
+            if ann.get("price_low") is not None:
+                sig["price_low"] = ann.get("price_low")
+            if ann.get("consideration") is not None:
+                sig["consideration"] = ann.get("consideration")
+        signals[t].append(sig)
 
     # Sort newest first per ticker
     for t in signals:
@@ -761,12 +1056,37 @@ def load_insider_announcements_from_db(
     placeholders = ",".join("?" * len(classifications))
     rows = conn.execute(
         f"""
-        SELECT document_key, ticker, date, headline, url, is_price_sensitive, classification, raw_json
+        SELECT {_ANN_SELECT_COLS}
         FROM announcements
         WHERE date >= ? AND classification IN ({placeholders})
         ORDER BY date DESC
         """,
         [since, *classifications],
+    ).fetchall()
+    conn.close()
+    return [_announcement_from_db_row(r) for r in rows]
+
+
+def load_buyback_announcements_from_db(
+    days: int = 365,
+    db_path: str = DEFAULT_DB_PATH,
+    missing_metrics_only: bool = False,
+) -> List[Dict]:
+    """Load buy-back announcements; optionally only rows still missing share/price metrics."""
+    init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    since = (datetime.now() - timedelta(days=days)).date().isoformat()
+    where = "date >= ? AND classification = 'buyback'"
+    if missing_metrics_only:
+        where += " AND (shares_purchased IS NULL AND metrics_parsed_at IS NULL)"
+    rows = conn.execute(
+        f"""
+        SELECT {_ANN_SELECT_COLS}
+        FROM announcements
+        WHERE {where}
+        ORDER BY date DESC
+        """,
+        (since,),
     ).fetchall()
     conn.close()
     return [_announcement_from_db_row(r) for r in rows]
@@ -845,19 +1165,107 @@ def _refine_unclassified_insider_rows(
     }
 
 
+def _refine_buyback_metrics_rows(
+    days: int = 365,
+    use_pdf: bool = True,
+    max_pdf_refine: int = 400,
+    db_path: str = DEFAULT_DB_PATH,
+    session: requests.Session = None,
+    force: bool = False,
+) -> Dict[str, int]:
+    """
+    Download buy-back PDFs and extract shares purchased / price / consideration.
+    Daily Appendix 3C notifications include previous-day share counts and high/low prices.
+    """
+    session = session or _get_session()
+    if use_pdf and PdfReader is None:
+        logger.warning("pypdf not installed — buyback share/price metrics will not be parsed")
+        return {
+            "pdf_checked": 0,
+            "with_shares": 0,
+            "with_price": 0,
+            "parsed": 0,
+            "candidates": 0,
+        }
+
+    candidates = load_buyback_announcements_from_db(
+        days=days,
+        db_path=db_path,
+        missing_metrics_only=not force,
+    )
+    if not candidates and not force:
+        # Nothing missing — still report counts for rows that already have metrics
+        all_bb = load_buyback_announcements_from_db(days=days, db_path=db_path)
+        return {
+            "pdf_checked": 0,
+            "with_shares": sum(1 for a in all_bb if a.get("shares_purchased")),
+            "with_price": sum(
+                1 for a in all_bb if a.get("price_avg") or a.get("price_high")
+            ),
+            "parsed": 0,
+            "candidates": 0,
+            "already_have_metrics": sum(
+                1 for a in all_bb if a.get("shares_purchased") or a.get("metrics_parsed_at")
+            ),
+        }
+
+    pdf_checked = parsed = with_shares = with_price = 0
+    for ann in candidates[:max_pdf_refine]:
+        if not use_pdf:
+            break
+        pdf_checked += 1
+        try:
+            metrics = extract_buyback_metrics_from_pdf(ann, session, max_pages=6)
+        except Exception as e:
+            logger.debug("Buyback metrics parse failed for %s: %s", ann.get("document_key"), e)
+            metrics = {}
+            # Mark attempted so we don't retry endlessly on empty/broken PDFs
+            ann["metrics_parsed_at"] = datetime.now().isoformat()
+            ann["metrics_json"] = json.dumps({"error": str(e)[:200]})
+            save_announcements_to_db([ann], db_path)
+            time.sleep(RATE_LIMIT_SECONDS * 0.5)
+            continue
+
+        if metrics:
+            parsed += 1
+            if metrics.get("shares_purchased"):
+                with_shares += 1
+            if metrics.get("price") or metrics.get("price_high") or metrics.get("price_avg"):
+                with_price += 1
+            save_announcements_to_db([ann], db_path)
+        else:
+            # Record attempt with empty metrics so force=False skips next time
+            ann["metrics_parsed_at"] = datetime.now().isoformat()
+            ann["metrics_json"] = json.dumps({})
+            save_announcements_to_db([ann], db_path)
+
+        time.sleep(RATE_LIMIT_SECONDS * 0.5)
+
+    return {
+        "pdf_checked": pdf_checked,
+        "parsed": parsed,
+        "with_shares": with_shares,
+        "with_price": with_price,
+        "candidates": len(candidates),
+    }
+
+
 def refresh_asx_announcements(
     days: int = 365,
     use_pdf: bool = True,
     incremental: bool = False,
     backfill: bool = False,
     max_pdf_refine: int = 500,
+    max_buyback_pdf: int = 400,
     db_path: str = DEFAULT_DB_PATH,
 ) -> Dict[str, Any]:
     """
-    Unified ASX ingest: paginated market fetch, PDF-refine insider notices, persist to SQLite.
+    Unified ASX ingest: paginated market fetch, PDF-refine insider notices,
+    parse buy-back share/price metrics, persist to SQLite.
     incremental=True for daily runs; backfill=True paginates full API window (~2-3 weeks).
     """
     init_db(db_path)
+    session = _get_session()
     try:
         ingest = fetch_market_announcements_paginated(
             days=days,
@@ -875,6 +1283,15 @@ def refresh_asx_announcements(
         use_pdf=use_pdf,
         max_pdf_refine=max_pdf_refine,
         db_path=db_path,
+        session=session,
+    )
+    buyback_metrics = _refine_buyback_metrics_rows(
+        days=days,
+        use_pdf=use_pdf,
+        max_pdf_refine=max_buyback_pdf,
+        db_path=db_path,
+        session=session,
+        force=False,
     )
 
     return {
@@ -884,6 +1301,7 @@ def refresh_asx_announcements(
         "backfill": backfill,
         "ingest": ingest,
         "refine": refine,
+        "buyback_metrics": buyback_metrics,
         "total_purchases": count_insider_purchases_in_db(days=days, db_path=db_path),
         "total_buybacks": count_buybacks_in_db(days=days, db_path=db_path),
         "last_market_fetch_at": get_scrape_meta("last_market_fetch_at", db_path),

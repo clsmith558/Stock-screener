@@ -1,0 +1,93 @@
+# Capital-cycle pariah *universe* (Pabrai / Manual of Ideas style).
+#
+# Membership is an explicit ticker list (plus inherited mining/commodity/
+# driller seeds) OR a tight Yahoo-industry allowlist.
+# NOT "all of Energy" / "all of Basic Materials" — majors, midstream,
+# utilities, and generic industrials stay out unless listed.
+
+description: >
+  Hated capital-heavy cyclicals: oil drillers, coal miners, steel/aluminum,
+  bulk miners, uranium, shipping and shipbuilding. Quantitative gates
+  (clean BS, depressed price, cheap vs book) apply only to this universe.
+  Does NOT prove replacement cost, ESG banking bans, or reserve life.
+
+# Yahoo `industry` / `industryDisp` substrings (matched on industry+sector only,
+# never on company name — "oil" must not pull every E&P/major).
+industries:
+  - oil & gas drilling
+  - oil & gas equipment
+  - oilfield services
+  - thermal coal
+  - coking coal
+  - coal
+  - steel
+  - aluminum
+  - copper
+  - iron
+  - gold
+  - silver
+  - uranium
+  - other industrial metals
+  - marine shipping
+  - marine transportation
+  - shipping
+  - shipbuild
+  - shipyard
+  - coking
+
+# Pull tickers from existing screener universes, then extra_tickers.
+inherit:
+  - path: config/us_mining_universe.yaml
+    skip_commodities: [potash, phosphate, fertilizer, royalty, minerals]
+    skip_tickers: [RS, RGLD, MOS, CF, IPI, CMP]
+  - path: config/asx_mining_universe.yaml
+  - path: config/commodity_producers.yaml
+  - path: config/supporting_series.yaml
+    clusters: [drillers, coal_met, coal_thermal_us, coal_asx, uranium]
+
+# Always-on seeds (Yahoo industry often blank on first cache). Drillers,
+# dry-bulk/tanker names, Korean shipbuilders.
+extra_tickers:
+  # Oil & gas drilling / offshore
+  - NE
+  - VAL
+  - RIG
+  - HP
+  - PTEN
+  - NBR
+  - PDS
+  - BORR
+  - SDRL
+  # Shipping (dry bulk / tanker — capital cycle poster children)
+  - SBLK
+  - GOGL
+  - DAC
+  - FRO
+  - STNG
+  - HAFN
+  - CMRE
+  # Shipbuilding (Korea)
+  - 010140.KS
+  - 009540.KS
+  - 329180.KS
+
+# Default quantitative thresholds (overridable in UI). Applied only after
+# universe membership.
+thresholds:
+  max_pct_from_52w_low: 30
+  max_pct_from_200w_ma: -20
+  max_debt_to_equity: 0.25
+  hard_max_debt_to_equity: 1.0
+  max_pb: 1.2
+  min_net_assets_vs_mcap_pct: 0
+  require_reorg_survivor: false
+  require_low_cost_quartile: false
+
+notes:
+  missing_for_full_thesis:
+    - replacement_cost_vs_market_cap
+    - bankruptcy_or_reorg_history
+    - reserve_life_cost_curve
+    - esg_lending_or_coverage_friction
+    - commodity_price_vs_cash_cost
+    - field_verification

@@ -7,8 +7,10 @@ cryptography>=3.1
 requests>=2.31.0
 beautifulsoup4>=4.12.0
 xlrd>=2.0.1
+openpyxl>=3.1.0
 pyyaml>=6.0
 python-dotenv>=1.0.0
+finance-datareader>=0.9.50  # KRX (KOSPI/KOSDAQ) listings for korea_stocks.csv
 # requests is a dependency of yfinance but we use it directly too
 # Optional / heavier:
 # pdfplumber  (better PDF text extraction if needed)

@@ -1,0 +1,394 @@
+# Commodity strips (from your Barchart daily CSV) + mining-pilot producers.
+# Override path with env COMMODITY_DATA_CSV.
+
+csv_path: "C:/Python scripts/Commodity data collection/daily_commodity_price_data.csv"
+
+# How stale before UI warns (calendar days)
+stale_after_days: 5
+
+# Ratio z-score lookback (trading days); falls back to full sample if shorter
+ratio_z_lookback: 90
+
+# Flags
+undervalued_ratio_z_max: -1.0
+undervalued_min_margin_pct: 15.0
+
+commodities:
+  coking_coal:
+    csv_name: "coking coal"
+    unit: "USD/t"
+    display: "Coking coal"
+  thermal_coal:
+    csv_name: "thermal coal"
+    unit: "USD/t"
+    display: "Thermal coal"
+  iron_ore:
+    csv_name: "iron ore"
+    unit: "USD/t"
+    display: "Iron ore 62% Fe"
+    plausible_min: 20
+    plausible_max: 250
+    notes: >
+      Strip is SGX TSI / IMF 62% Fe CFR USD/t. The Barchart daily CSV
+      "iron ore" row was Tokyo Topix-Mini (TS*0, ~4000) — ignored.
+  aluminum:
+    csv_name: "aluminum"
+    unit: "USD/t"
+    display: "Aluminum"
+  copper:
+    csv_name: "copper"
+    unit: "USD/lb"
+    display: "Copper"
+  silver:
+    csv_name: "silver"
+    unit: "USD/oz"
+    display: "Silver"
+  gold:
+    csv_name: "gold"
+    unit: "USD/oz"
+    display: "Gold"
+  crude_oil_wti:
+    csv_name: "crude oil WTI"
+    unit: "USD/bbl"
+    display: "Crude oil WTI"
+  crude_oil_brent:
+    csv_name: "crude oil brent"
+    unit: "USD/bbl"
+    display: "Crude oil Brent"
+  platinum:
+    csv_name: "platinum"
+    unit: "USD/oz"
+    display: "Platinum"
+  palladium:
+    csv_name: "palladium"
+    unit: "USD/oz"
+    display: "Palladium"
+  steel_scrap:
+    csv_name: "steel scrap"
+    unit: "USD/t"
+    display: "Steel scrap"
+  steel_rebar:
+    csv_name: "steel rebar"
+    unit: "USD/t"
+    display: "Steel rebar"
+  uranium_u3o8:
+    display: Uranium U3O8
+    unit: USD/lb
+    notes: Official monthly FRED via supporting_series.db
+  henry_hub:
+    display: Henry Hub natural gas
+    unit: USD/MMBtu
+    notes: Official daily FRED/EIA via supporting_series.db
+  lithium_carbonate:
+    display: Lithium carbonate
+    unit: USD/t
+    notes: >
+      No honest public daily. Monthly World Bank Pink Sheet when the column
+      exists (supporting_series.db). Spodumene FOB costs are USD/t SC6, not LCE.
+
+# Producers shown on the Commodities tab. Filter options = union of `primary`
+# + `commodities`. Unit costs only when cost_source cache exists.
+producers:
+  - ticker: NHC.AX
+    name: New Hope
+    commodities: [coking_coal, thermal_coal]
+    primary: coking_coal
+    cost_source: asx_mining
+  - ticker: WHC.AX
+    name: Whitehaven Coal
+    commodities: [coking_coal, thermal_coal]
+    primary: coking_coal
+    cost_source: asx_mining
+  - ticker: YAL.AX
+    name: Yancoal
+    commodities: [coking_coal, thermal_coal]
+    primary: thermal_coal
+    cost_source: asx_mining
+  - ticker: BTU
+    name: Peabody Energy
+    commodities: [thermal_coal, coking_coal]
+    primary: thermal_coal
+    cost_source: us_mining
+  - ticker: HCC
+    name: Warrior Met Coal
+    commodities: [coking_coal]
+    primary: coking_coal
+    cost_source: us_mining
+  - ticker: AMR
+    name: Alpha Metallurgical
+    commodities: [coking_coal]
+    primary: coking_coal
+    cost_source: us_mining
+  - ticker: ARLP
+    name: Alliance Resource Partners
+    commodities: [thermal_coal]
+    primary: thermal_coal
+    cost_source: us_mining
+  - ticker: NEM
+    name: Newmont
+    commodities: [gold]
+    primary: gold
+    cost_source: us_mining
+  - ticker: NEM.AX
+    name: Newmont (ASX CDIs)
+    commodities: [gold]
+    primary: gold
+    cost_source: asx_mining
+  - ticker: FCX
+    name: Freeport-McMoRan
+    commodities: [copper]
+    primary: copper
+    cost_source: us_mining
+  - ticker: SCCO
+    name: Southern Copper
+    commodities: [copper]
+    primary: copper
+    cost_source: us_mining
+  - ticker: AA
+    name: Alcoa
+    commodities: [aluminum]
+    primary: aluminum
+    cost_source: yaml
+
+  # --- extra names that also produce the original five ---
+  - ticker: AEM
+    name: Agnico Eagle
+    commodities: [gold]
+    primary: gold
+    cost_source: us_mining
+  - ticker: GOLD
+    name: Barrick Gold
+    commodities: [gold]
+    primary: gold
+    cost_source: us_mining
+  - ticker: KGC
+    name: Kinross Gold
+    commodities: [gold]
+    primary: gold
+    cost_source: us_mining
+  - ticker: AU
+    name: AngloGold Ashanti
+    commodities: [gold]
+    primary: gold
+    cost_source: us_mining
+  - ticker: HL
+    name: Hecla Mining
+    commodities: [gold, silver]
+    primary: gold
+    cost_source: us_mining
+  - ticker: CDE
+    name: Coeur Mining
+    commodities: [gold, silver]
+    primary: gold
+    cost_source: us_mining
+  - ticker: MUX
+    name: McEwen Mining
+    commodities: [gold, copper]
+    primary: gold
+    cost_source: us_mining
+  - ticker: NST.AX
+    name: Northern Star
+    commodities: [gold]
+    primary: gold
+  - ticker: EVN.AX
+    name: Evolution Mining
+    commodities: [gold]
+    primary: gold
+  - ticker: RMS.AX
+    name: Ramelius Resources
+    commodities: [gold]
+    primary: gold
+  - ticker: PRU.AX
+    name: Perseus Mining
+    commodities: [gold]
+    primary: gold
+  - ticker: GFI
+    name: Gold Fields
+    commodities: [gold]
+    primary: gold
+    cost_source: us_mining
+    notes: AISC from 6-K / 20-F (JSE/NYSE foreign issuer).
+  - ticker: HBM
+    name: Hudbay Minerals
+    commodities: [copper]
+    primary: copper
+    cost_source: us_mining
+  - ticker: TECK
+    name: Teck Resources
+    commodities: [copper, thermal_coal, coking_coal]
+    primary: copper
+    cost_source: us_mining
+  - ticker: CENX
+    name: Century Aluminum
+    commodities: [aluminum]
+    primary: aluminum
+    cost_source: us_mining
+  - ticker: CSTM
+    name: Constellium
+    commodities: [aluminum]
+    primary: aluminum
+    cost_source: us_mining
+  - ticker: CNR
+    name: Core Natural Resources
+    commodities: [thermal_coal, coking_coal]
+    primary: thermal_coal
+    cost_source: us_mining
+  - ticker: METC
+    name: Ramaco Resources
+    commodities: [coking_coal]
+    primary: coking_coal
+    cost_source: us_mining
+  - ticker: HNRG
+    name: Hallador Energy
+    commodities: [thermal_coal]
+    primary: thermal_coal
+    cost_source: us_mining
+
+  # --- iron ore ---
+  - ticker: BHP
+    name: BHP
+    commodities: [iron_ore, copper]
+    primary: iron_ore
+  - ticker: RIO
+    name: Rio Tinto
+    commodities: [iron_ore, copper, aluminum]
+    primary: iron_ore
+  - ticker: VALE
+    name: Vale
+    commodities: [iron_ore, copper]
+    primary: iron_ore
+    cost_source: us_mining
+    notes: >
+      C1 cash cost of iron ore fines, FOB, excluding third-party purchases (USD/t).
+      Not all-in CFR China. Strip is typically 62% Fe CFR — margin is indicative.
+  - ticker: FMG.AX
+    name: Fortescue
+    commodities: [iron_ore]
+    primary: iron_ore
+    cost_source: asx_mining
+    notes: >
+      Hematite C1 unit cost (USD/wmt), excluding Iron Bridge magnetite.
+      Wet tonnes vs dry 62% Fe CFR strip — margin is indicative.
+    cost_history_pdfs:
+      - period_end: "2026-06-30"
+        url: "https://cdn-api.markitdigital.com/apiman-gateway/ASX/asx-research/1.0/file/2924-03116249-6A1336475"
+        label: Q4 FY26 Quarterly Production Report
+      - period_end: "2026-03-31"
+        url: "https://announcements.asx.com.au/asxpdf/20260424/pdf/06ytclmh4bwzlr.pdf"
+        label: Q3 FY26 Quarterly Production Report
+      - period_end: "2025-12-31"
+        url: "https://cdn-api.markitdigital.com/apiman-gateway/ASX/asx-research/1.0/file/2924-03048082-6A1307990"
+        label: Q2 FY26 Quarterly Production Report
+  - ticker: MIN.AX
+    name: Mineral Resources
+    commodities: [iron_ore, lithium_carbonate]
+    primary: iron_ore
+    cost_source: asx_mining
+    notes: >
+      Not a group pure-play (Onslow Iron + lithium + mining services).
+      Unit cost is Onslow Iron FOB $/wmt (AUD unless US$ stated).
+  - ticker: CIA.AX
+    name: Champion Iron
+    commodities: [iron_ore]
+    primary: iron_ore
+    cost_source: asx_mining
+    notes: >
+      Bloom Lake C1 cash cost loaded onto vessels, USD/dmt (CAD also disclosed).
+      Higher than Pilbara hematite C1 because it includes rail/port.
+  - ticker: CLF
+    name: Cleveland-Cliffs
+    commodities: [iron_ore, steel_scrap]
+    primary: iron_ore
+    cost_source: us_mining
+
+  # --- silver ---
+  - ticker: PAAS
+    name: Pan American Silver
+    commodities: [silver, gold]
+    primary: silver
+    cost_source: us_mining
+  - ticker: AG
+    name: First Majestic Silver
+    commodities: [silver]
+    primary: silver
+    cost_source: us_mining
+
+  # --- steel ---
+  - ticker: NUE
+    name: Nucor
+    commodities: [steel_scrap]
+    primary: steel_scrap
+    cost_source: us_mining
+  - ticker: STLD
+    name: Steel Dynamics
+    commodities: [steel_scrap]
+    primary: steel_scrap
+    cost_source: us_mining
+
+  # --- uranium ---
+  - ticker: CCJ
+    name: Cameco
+    commodities: [uranium_u3o8]
+    primary: uranium_u3o8
+    cost_source: us_mining
+  - ticker: UEC
+    name: Uranium Energy
+    commodities: [uranium_u3o8]
+    primary: uranium_u3o8
+    cost_source: us_mining
+  - ticker: PDN.AX
+    name: Paladin Energy
+    commodities: [uranium_u3o8]
+    primary: uranium_u3o8
+
+  # --- oil ---
+  - ticker: OXY
+    name: Occidental Petroleum
+    commodities: [crude_oil_wti, crude_oil_brent]
+    primary: crude_oil_wti
+  - ticker: COP
+    name: ConocoPhillips
+    commodities: [crude_oil_wti, crude_oil_brent]
+    primary: crude_oil_wti
+  - ticker: WDS.AX
+    name: Woodside Energy
+    commodities: [crude_oil_brent]
+    primary: crude_oil_brent
+
+  # --- gassy E&P vs Henry Hub ---
+  - ticker: EQT
+    name: EQT
+    commodities: [henry_hub]
+    primary: henry_hub
+  - ticker: CNX
+    name: CNX Resources
+    commodities: [henry_hub]
+    primary: henry_hub
+  - ticker: RRC
+    name: Range Resources
+    commodities: [henry_hub]
+    primary: henry_hub
+  - ticker: AR
+    name: Antero Resources
+    commodities: [henry_hub]
+    primary: henry_hub
+
+  # --- lithium (pure-play / near pure-play) ---
+  - ticker: PLS.AX
+    name: PLS (Pilbara Minerals)
+    commodities: [lithium_carbonate]
+    primary: lithium_carbonate
+    cost_source: asx_mining
+    notes: >
+      Spodumene unit operating cost FOB Port Hedland, USD/t (often SC6).
+      Strip is lithium carbonate USD/t when Pink Sheet lands — not the same product.
+  - ticker: LTR.AX
+    name: Liontown
+    commodities: [lithium_carbonate]
+    primary: lithium_carbonate
+    cost_source: asx_mining
+  - ticker: SGML
+    name: Sigma Lithium
+    commodities: [lithium_carbonate]
+    primary: lithium_carbonate
+    cost_source: us_mining

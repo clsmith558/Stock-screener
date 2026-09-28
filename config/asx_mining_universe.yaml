@@ -1,0 +1,77 @@
+# ASX mining pilot (phase 1–3) — coal focus + Newmont dual-list check.
+# Tickers are ASX codes (no .AX); yf_symbol used for dashboard join.
+
+description: >
+  ASX-listed miners for reorg (VA/DOCA/scheme headlines), JORC/reserves and
+  unit costs from ASX announcements PDFs + optional IR annual-report seeds.
+  NEM dual-lists with US NEM for SEC cross-check. FMG hematite C1 (USD/wmt)
+  uses the same quarterly PDF path as coal FOB cash cost.
+
+companies:
+  - ticker: YAL
+    yf_symbol: YAL.AX
+    name: Yancoal Australia
+    commodities: [coal]
+    # IR / annual report seeds when free ASX API history is shallow
+    seed_pdfs:
+      - kind: annual_report
+        url: https://www.yancoal.com.au/wp-content/uploads/2024/10/YAL_Full_Year_Statutory_Accounts.pdf
+        note: FY statutory accounts (reserves may be limited)
+
+  - ticker: WHC
+    yf_symbol: WHC.AX
+    name: Whitehaven Coal
+    commodities: [coal]
+    seed_pdfs:
+      - kind: annual_report
+        url: https://whitehavencoal.com.au/wp-content/uploads/2025/09/WHC_2025_Annual_Report.pdf
+        note: WHC Annual Report 2025 (Coal Reserves section)
+
+  - ticker: NHC
+    yf_symbol: NHC.AX
+    name: New Hope Corporation
+    commodities: [coal]
+    seed_pdfs:
+      - kind: annual_report
+        url: https://newhopegroup.com.au/wp-content/uploads/2025/09/New-Hope-Group-Appendix-4E-and-Annual-Report-2025.pdf
+        note: Appendix 4E + Annual Report 2025 (Coal Resources and Reserves)
+
+  - ticker: NEM
+    yf_symbol: NEM.AX
+    name: Newmont Corporation (ASX CDIs)
+    commodities: [gold]
+    us_crossfill: NEM
+    notes: Dual-listed with US NEM — compare ASX parse vs SEC phase-2/3 cache
+
+  - ticker: FMG
+    yf_symbol: FMG.AX
+    name: Fortescue
+    commodities: [iron]
+
+  - ticker: CIA
+    yf_symbol: CIA.AX
+    name: Champion Iron
+    commodities: [iron]
+
+  - ticker: MIN
+    yf_symbol: MIN.AX
+    name: Mineral Resources
+    commodities: [iron, lithium]
+
+  - ticker: PLS
+    yf_symbol: PLS.AX
+    name: PLS (Pilbara Minerals)
+    commodities: [lithium]
+    seed_pdfs:
+      - kind: quarterly
+        url: https://cdn-api.markitdigital.com/apiman-gateway/ASX/asx-research/1.0/file/2924-03116249-6A1336475
+        note: Q4 FY26 quarterly production — Hematite C1 US$/wmt
+      - kind: quarterly
+        url: https://announcements.asx.com.au/asxpdf/20260424/pdf/06ytclmh4bwzlr.pdf
+        note: Q3 FY26 quarterly production — Hematite C1 US$/wmt
+      - kind: quarterly
+        url: https://cdn-api.markitdigital.com/apiman-gateway/ASX/asx-research/1.0/file/2924-03048082-6A1307990
+        note: Q2 FY26 quarterly production — Hematite C1 US$/wmt
+
+fetch_sleep_seconds: 0.5
+announcement_lookback_pages: 0  # company endpoint is recent-only (~5)

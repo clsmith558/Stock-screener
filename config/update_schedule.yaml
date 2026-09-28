@@ -1,0 +1,168 @@
+# Jobs for scripts/run_scheduled_updates.py (Task Scheduler / manual).
+# Each job runs only when stale (last successful finish older than max_age_hours)
+# or when --force is passed.
+#
+# Sleep note: Windows S3 sleep freezes the CPU — jobs do NOT run while asleep.
+# Use Task Scheduler "Run task as soon as possible after a scheduled start is missed"
+# plus an interval trigger (e.g. every 12h) so Saturday/Sunday catch up after wake.
+
+# Global defaults
+defaults:
+  # If true, skip heavy jobs when on battery (best-effort; Windows only)
+  skip_on_battery: false
+  log_dir: logs
+
+jobs:
+  # Daily-ish: ASX insider/buyback announcements + registry rebuild
+  - id: asx_announcements
+    enabled: true
+    max_age_hours: 24
+    description: ASX announcements (incremental) + buyback registry
+    command: [scripts/collect_asx_announcements.py]
+    # timeout_seconds: 0 means no hard timeout in orchestrator
+    timeout_seconds: 7200
+
+  # Multi-quarter unit costs for commodity / mining pilot charts
+  - id: unit_cost_history
+    enabled: true
+    max_age_hours: 72
+    description: Multi-period unit costs (ASX seeds + US SEC)
+    command: [scripts/collect_unit_cost_history.py]
+    timeout_seconds: 3600
+
+  # Official EIA/FRED + Pink Sheet monthly + AEMO daily means
+  - id: supporting_series
+    enabled: true
+    max_age_hours: 24
+    description: Official EIA/FRED/Pink Sheet/AEMO supporting series
+    command: [scripts/collect_supporting_series.py]
+    timeout_seconds: 1800
+
+  # Phase 2: production / realized price / hedge / capex from filings (seed list)
+  - id: operating_extract
+    enabled: true
+    max_age_hours: 168
+    description: Filing extracts (production, realized, hedge, capex) for seed names
+    command: [scripts/collect_operating_extract.py]
+    timeout_seconds: 3600
+
+  # --- yfinance price / metrics caches (dashboard tables) ---
+  # Only symbols with cache older than --max-cache-days are hit (default 7).
+  # Does NOT require Flask to be running.
+
+  # Personal watchlist — small, safe to run often
+  - id: yf_watchlist
+    enabled: true
+    max_age_hours: 24
+    description: yfinance refresh for watchlist tickers
+    command:
+      - scripts/rebuild_yf_cache.py
+      - --scope
+      - watchlist
+      - --max-cache-days
+      - "3"
+    timeout_seconds: 3600
+
+  # S&P 500 + custom Business list CSVs + buybacks registry (not full ASX)
+  # Skips Japan/Korea/small-cap dumps (>800 names) so the job finishes.
+  - id: yf_lists
+    enabled: true
+    max_age_hours: 72
+    description: yfinance for S&P500, mid-size business CSVs, buybacks (stale >7d)
+    command:
+      - scripts/rebuild_yf_cache.py
+      - --scope
+      - lists
+      - --max-cache-days
+      - "7"
+      - --max-list-size
+      - "800"
+    timeout_seconds: 14400
+
+  # US SEC 8-K / 10-Q buyback + Form 4 insider scan (slow; weekly)
+  - id: us_sec_buybacks
+    enabled: true
+    max_age_hours: 168
+    description: SEC EDGAR buyback + insider scan (Russell 1000 ∪ Nasdaq-100 ∪ S&P 500)
+    command: [scripts/collect_us_buybacks.py]
+    timeout_seconds: 14400
+
+  # Full ASX listed universe — hours; keep off unless you want weekly overnight runs
+  - id: yf_asx_full
+    enabled: false
+    max_age_hours: 336
+    description: yfinance full ASX universe (slow; enable for ~biweekly catch-up)
+    command:
+      - scripts/rebuild_yf_cache.py
+      - --scope
+      - asx
+      - --max-cache-days
+      - "14"
+    timeout_seconds: 28800
+
+  # Inactive / delisted hygiene — keep YF queues lean
+  - id: inactive_hygiene
+    enabled: true
+    max_age_hours: 168
+    description: Promote dead quotes, purge confirmed inactive from lists/CSVs
+    command:
+      - scripts/hygiene_inactive_symbols.py
+      - --revalidate-limit
+      - "40"
+    timeout_seconds: 3600
+
+  # US index constituents (Wikipedia) — ~every 6 months
+  - id: us_index_lists
+    enabled: true
+    max_age_hours: 4320
+    description: Refresh S&P 500 / Russell 1000 / Nasdaq-100 builtin lists
+    command: [scripts/refresh_us_index_lists.py]
+    timeout_seconds: 600
+
+  # China CSI 300 + Hong Kong Hang Seng + Taiwan 50 (plus buyback extras)
+  # Weekly so A-share repurchase extras stay current (index members change slowly).
+  - id: china_hk_index_lists
+    enabled: true
+    max_age_hours: 168
+    description: Refresh China CSI 300, Hang Seng, and Taiwan 50 lists
+    command: [scripts/refresh_china_hk_index_lists.py]
+    timeout_seconds: 600
+
+  # Morningstar wide-moat proxy (Best Companies CSVs + public compilation + MOAT ETF)
+  # Best Companies article is annual; MOAT Focus reconstitutes quarterly.
+  - id: morningstar_wide_moat
+    enabled: true
+    max_age_hours: 720
+    description: Refresh Morningstar wide-moat Business list (public proxy)
+    command: [scripts/refresh_morningstar_wide_moat.py]
+    timeout_seconds: 300
+
+  # Item 1.03 reorg scan — weekly is enough
+  - id: mining_item103
+    enabled: false
+    max_age_hours: 168
+    description: US mining Item 1.03 8-K scan
+    command: [scripts/collect_item_103.py]
+    timeout_seconds: 3600
+
+  # Mining reserves / costs — enable if you use Pariah mining pilots often
+  - id: mining_reserves
+    enabled: false
+    max_age_hours: 168
+    description: US mining S-K 1300 reserves scan
+    command: [scripts/collect_mining_reserves.py]
+    timeout_seconds: 3600
+
+  - id: mining_costs
+    enabled: false
+    max_age_hours: 168
+    description: US mining unit-cost 10-K scan
+    command: [scripts/collect_mining_costs.py]
+    timeout_seconds: 3600
+
+  - id: asx_mining
+    enabled: false
+    max_age_hours: 168
+    description: ASX mining pilot (YAL/WHC/NHC/NEM)
+    command: [scripts/collect_asx_mining.py]
+    timeout_seconds: 3600

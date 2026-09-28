@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """
 Multi-Market Signal Screener (ASX + US)
-Clean, split version
+Personal local dashboard — bind to loopback by default.
 """
 
+from __future__ import annotations
+
+import hmac
+import logging
+import os
+import threading
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
+from flask import Flask, jsonify, render_template, request
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
-
-from flask import Flask, jsonify, request, render_template
-from datetime import datetime, timedelta
-import logging
 
 from data.asx import fetch_asx_stocks, get_asx_meta, update_asx_company_list
 from data.us import fetch_us_stocks
@@ -20,8 +24,91 @@ from data.us import fetch_us_stocks
 logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
-_asx_cache = {}
-_us_cache = {}
+_TRUE_VALUES = frozenset({"1", "true", "yes", "all", "on"})
+# Sent when SCREENER_API_TOKEN is unset. The value is not secret: cross-site
+# pages cannot set a custom header without a CORS preflight, which this app
+# does not answer. Must match LOCAL_MUTATION_TOKEN in templates/index.html.
+_LOCAL_MUTATION_HEADER = "local"
+
+
+def _bool_arg(name: str, default: bool = False) -> bool:
+    raw = request.args.get(name)
+    if raw is None:
+        return default
+    return str(raw).lower() in _TRUE_VALUES
+
+
+def _int_arg(name: str, default: int) -> int:
+    raw = request.args.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _float_arg(name: str, default: float = 0.0) -> float:
+    raw = request.args.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_loopback() -> bool:
+    addr = (request.remote_addr or "").strip().lower()
+    return addr in ("127.0.0.1", "::1", "localhost")
+
+
+def _run_background(fn, *args, **kwargs):
+    def _bg():
+        try:
+            fn(*args, **kwargs)
+        except Exception:
+            logger.exception("Background job failed: %s", getattr(fn, "__name__", fn))
+
+    threading.Thread(target=_bg, daemon=True).start()
+
+
+def _json_error(message: str, code: int = 500, **extra):
+    payload = {"status": "error", "error": message, **extra}
+    return jsonify(payload), code
+
+
+def _json_ok(message: str = "ok", **extra):
+    payload = {"status": "ok", "message": message, **extra}
+    return jsonify(payload)
+
+
+@app.before_request
+def _protect_mutating_routes():
+    """Personal screener: mutating calls must come from this dashboard.
+
+    A custom header blocks cross-site form posts and cross-origin fetch.
+    Query-string tokens are ignored so the secret is not written to logs.
+    """
+    if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
+        return None
+
+    provided = (request.headers.get("X-Screener-Token") or "").strip()
+    token = os.environ.get("SCREENER_API_TOKEN", "").strip()
+    expected = token or _LOCAL_MUTATION_HEADER
+    if not provided or not hmac.compare_digest(provided, expected):
+        return jsonify({
+            "error": "Unauthorized — provide X-Screener-Token header",
+        }), 401
+
+    allow_remote = os.environ.get("SCREENER_ALLOW_REMOTE", "").strip().lower() in _TRUE_VALUES
+    if not allow_remote and not _is_loopback():
+        return jsonify({
+            "error": "Mutating API only allowed from localhost "
+                     "(set SCREENER_ALLOW_REMOTE=1 only if you understand the risk)",
+        }), 403
+    return None
+
 
 def get_stocks_for_market(
     market: str,
@@ -29,18 +116,58 @@ def get_stocks_for_market(
     force_yf: bool = False,
     list_id: str = None,
     signals_only: bool = False,
+    fast: bool = False,
 ):
+    from data.watchlist import annotate_on_watchlist
+    from data.yf_helpers import sanitize_stocks
+
     market = (market or "asx").lower()
-    if market in ("business", "buybacks"):
+    if market == "watchlist":
+        from data.watchlist import fetch_watchlist_stocks
+
+        stocks = fetch_watchlist_stocks()
+    elif market in ("business", "buybacks"):
         from data.business_lists import BUILTIN_BUYBACKS_LIST_ID, fetch_business_list_stocks
         lid = list_id or (BUILTIN_BUYBACKS_LIST_ID if market == "buybacks" else "")
-        return fetch_business_list_stocks(lid, force_yf=force_yf, signals_only=signals_only)
-    if market == "us":
-        return fetch_us_stocks(force_yf=force_yf)
-    return fetch_asx_stocks(full=full, force_yf=force_yf)
+        stocks = fetch_business_list_stocks(
+            lid, force_yf=force_yf, signals_only=signals_only, fast=fast
+        )
+    elif market == "us":
+        stocks = fetch_us_stocks(force_yf=force_yf)
+    else:
+        stocks = fetch_asx_stocks(full=full, force_yf=force_yf)
+    stocks = sanitize_stocks(stocks)
+    stocks = annotate_on_watchlist(stocks)
+    try:
+        from data.business_lists import BUILTIN_PARIAH_LIST_ID
+        from data.supporting_series import annotate_stocks_with_drivers, list_id_is_energy_pilot
+
+        if (not fast) and (
+            market == "watchlist"
+            or (
+                market == "business"
+                and (list_id_is_energy_pilot(list_id) or list_id == BUILTIN_PARIAH_LIST_ID)
+            )
+        ):
+            stocks = annotate_stocks_with_drivers(stocks)
+    except Exception as e:
+        logger.debug("driver annotate skipped: %s", e)
+    return stocks
+
 
 def _get_market_meta(market: str, list_id: str = None):
     market = (market or "asx").lower()
+    if market == "watchlist":
+        from data.watchlist import list_watchlist
+
+        n = len(list_watchlist())
+        return {
+            "data_source": "Personal watchlist (local SQLite)",
+            "last_scraped": datetime.now().isoformat(),
+            "market": "watchlist",
+            "universe_count": n,
+            "watchlist_count": n,
+        }
     if market == "business":
         try:
             from data.business_lists import get_business_meta
@@ -61,7 +188,7 @@ def _get_market_meta(market: str, list_id: str = None):
         except Exception:
             meta = {
                 "data_source": "yfinance + SEC EDGAR (ROIC, shares) + Form 4",
-                "last_scraped": datetime.now().isoformat()
+                "last_scraped": datetime.now().isoformat(),
             }
     else:
         try:
@@ -69,43 +196,529 @@ def _get_market_meta(market: str, list_id: str = None):
         except Exception:
             meta = {
                 "data_source": "yfinance + ASX Announcements (Markit Digital)",
-                "last_scraped": datetime.now().isoformat()
+                "last_scraped": datetime.now().isoformat(),
             }
     meta["market"] = market
     return meta
 
+
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template(
+        "index.html",
+        screener_api_token=os.environ.get("SCREENER_API_TOKEN", "").strip(),
+    )
+
+
+@app.route("/api/pariah/config")
+def api_pariah_config():
+    """Capital-cycle pariah candidate filter config (sectors, keywords, thresholds)."""
+    try:
+        from data.pariah_filter import pariah_config_public
+        return jsonify(pariah_config_public())
+    except Exception as e:
+        logger.exception("api_pariah_config failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/pariah/reorg")
+def api_pariah_reorg():
+    """Phase-1 bankruptcy / Item 1.03 status for US mining pilot."""
+    try:
+        from data.bankruptcy_reorg import list_reorg_summaries, reorg_status_public
+        detail = request.args.get("detail", "").lower() in ("1", "true", "yes")
+        status = reorg_status_public()
+        if detail:
+            status["summaries"] = list_reorg_summaries()
+        return jsonify(status)
+    except Exception as e:
+        logger.exception("api_pariah_reorg failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/pariah/reorg/scan", methods=["POST"])
+def api_pariah_reorg_scan():
+    """Scan mining universe for Item 1.03 8-Ks (can take several minutes)."""
+    try:
+        from data.bankruptcy_reorg import reorg_status_public, scan_mining_universe
+        force = _bool_arg("force")
+        tickers_raw = (request.args.get("tickers") or "").strip()
+        if not tickers_raw and request.is_json and request.json:
+            tickers_raw = str(request.json.get("tickers") or "")
+        tickers = [t.strip().upper() for t in tickers_raw.split(",") if t.strip()] or None
+        result = scan_mining_universe(force=force, tickers=tickers)
+        return jsonify({
+            "scanned": result.get("scanned"),
+            "skipped": result.get("skipped"),
+            "errors": result.get("errors"),
+            "finished_at": result.get("finished_at"),
+            "status": reorg_status_public(),
+        })
+    except Exception as e:
+        logger.exception("api_pariah_reorg_scan failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/pariah/reserves")
+def api_pariah_reserves():
+    """Phase-2 mining reserves / reserve-life status (10-K S-K 1300 parse)."""
+    try:
+        from data.mining_reserves import list_reserves_summaries, reserves_status_public
+        detail = request.args.get("detail", "").lower() in ("1", "true", "yes")
+        status = reserves_status_public()
+        if detail:
+            status["summaries"] = list_reserves_summaries()
+        return jsonify(status)
+    except Exception as e:
+        logger.exception("api_pariah_reserves failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/pariah/reserves/scan", methods=["POST"])
+def api_pariah_reserves_scan():
+    """Scan mining universe 10-Ks for reserves / life (can take several minutes)."""
+    try:
+        from data.mining_reserves import reserves_status_public, scan_mining_reserves
+        force = _bool_arg("force")
+        tickers_raw = (request.args.get("tickers") or "").strip()
+        if not tickers_raw and request.is_json and request.json:
+            tickers_raw = str(request.json.get("tickers") or "")
+        tickers = [t.strip().upper() for t in tickers_raw.split(",") if t.strip()] or None
+        result = scan_mining_reserves(force=force, tickers=tickers)
+        return jsonify({
+            "scanned": result.get("scanned"),
+            "skipped": result.get("skipped"),
+            "errors": result.get("errors"),
+            "finished_at": result.get("finished_at"),
+            "status": reserves_status_public(),
+        })
+    except Exception as e:
+        logger.exception("api_pariah_reserves_scan failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/pariah/costs")
+def api_pariah_costs():
+    """Phase-3 reported unit costs + pilot peer ranks (not industry curve)."""
+    try:
+        from data.mining_costs import costs_status_public, list_costs_summaries
+        detail = request.args.get("detail", "").lower() in ("1", "true", "yes")
+        status = costs_status_public()
+        if detail:
+            status["summaries"] = list_costs_summaries()
+        return jsonify(status)
+    except Exception as e:
+        logger.exception("api_pariah_costs failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/pariah/costs/scan", methods=["POST"])
+def api_pariah_costs_scan():
+    """Scan mining 10-Ks for unit costs and recompute peer ranks."""
+    try:
+        from data.mining_costs import costs_status_public, scan_mining_costs
+        force = _bool_arg("force")
+        tickers_raw = (request.args.get("tickers") or "").strip()
+        if not tickers_raw and request.is_json and request.json:
+            tickers_raw = str(request.json.get("tickers") or "")
+        tickers = [t.strip().upper() for t in tickers_raw.split(",") if t.strip()] or None
+        result = scan_mining_costs(force=force, tickers=tickers)
+        return jsonify({
+            "scanned": result.get("scanned"),
+            "skipped": result.get("skipped"),
+            "errors": result.get("errors"),
+            "finished_at": result.get("finished_at"),
+            "ranks": result.get("ranks"),
+            "status": costs_status_public(),
+        })
+    except Exception as e:
+        logger.exception("api_pariah_costs_scan failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/pariah/asx-mining")
+def api_pariah_asx_mining():
+    """ASX mining pilot status (YAL/WHC/NHC/NEM phases 1–3)."""
+    try:
+        from data.asx_mining import asx_mining_status_public
+        return jsonify(asx_mining_status_public())
+    except Exception as e:
+        logger.exception("api_pariah_asx_mining failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/pariah/asx-mining/scan", methods=["POST"])
+def api_pariah_asx_mining_scan():
+    """Scan ASX mining pilot (announcements + seed PDFs + optional US cross-fill)."""
+    try:
+        from data.asx_mining import asx_mining_status_public, scan_asx_mining_universe
+        force = _bool_arg("force")
+        tickers_raw = (request.args.get("tickers") or "").strip()
+        if not tickers_raw and request.is_json and request.json:
+            tickers_raw = str(request.json.get("tickers") or "")
+        tickers = [t.strip().upper() for t in tickers_raw.split(",") if t.strip()] or None
+        result = scan_asx_mining_universe(force=force, tickers=tickers)
+        return jsonify({
+            "scanned": result.get("scanned"),
+            "skipped": result.get("skipped"),
+            "errors": result.get("errors"),
+            "finished_at": result.get("finished_at"),
+            "ranks": result.get("ranks"),
+            "status": asx_mining_status_public(),
+        })
+    except Exception as e:
+        logger.exception("api_pariah_asx_mining_scan failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/indices")
+def api_indices():
+    """Major national indices: drawdowns + PE proxies (ETF / Multpl / local constituents)."""
+    force = _bool_arg("force")
+    try:
+        from data.indices import get_indices_overview
+        return jsonify(get_indices_overview(force=force))
+    except Exception as e:
+        logger.exception("api_indices failed")
+        return jsonify({"indices": [], "error": str(e)}), 500
+
+
+@app.route("/api/commodities")
+def api_commodities():
+    """Commodity strip overview from local daily CSV collection."""
+    force = _bool_arg("force")
+    try:
+        from data.commodity_prices import commodities_overview
+        return jsonify(commodities_overview(force=force))
+    except Exception as e:
+        logger.exception("api_commodities failed")
+        return jsonify({"commodities": [], "error": str(e)}), 500
+
+
+@app.route("/api/commodities/producers")
+def api_commodities_producers():
+    """Mining-pilot producers joined to commodity strips + unit costs + stock ratios."""
+    force = _bool_arg("force")
+    try:
+        from data.commodity_producers import list_producers
+        return jsonify(list_producers(force=force))
+    except Exception as e:
+        logger.exception("api_commodities_producers failed")
+        return jsonify({"producers": [], "error": str(e)}), 500
+
+
+@app.route("/api/commodities/<commodity_id>/panel")
+def api_commodities_panel(commodity_id):
+    """Commodity strip vs all mapped producers' unit costs (no producer selected)."""
+    try:
+        from data.commodity_producers import commodity_cohort_panel
+
+        payload = commodity_cohort_panel(commodity_id)
+        if payload.get("error"):
+            return jsonify(payload), 404
+        return jsonify(payload)
+    except Exception as e:
+        logger.exception("api_commodities_panel failed for %s", commodity_id)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/commodities/producers/<ticker>")
+def api_commodities_producer_detail(ticker):
+    """Single producer detail + dual chart series."""
+    try:
+        from data.commodity_producers import producer_detail
+        payload = producer_detail(ticker)
+        if payload.get("error"):
+            return jsonify(payload), 404
+        return jsonify(payload)
+    except Exception as e:
+        logger.exception("api_commodities_producer_detail failed for %s", ticker)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/operating/<path:ticker>")
+def api_operating_ticker(ticker):
+    """Phase-2 filing extracts (production / realized / hedge / capex)."""
+    try:
+        from data.operating_extract import get_operating_history, latest_operating
+
+        hist = get_operating_history(ticker)
+        return jsonify(
+            {
+                "ticker": (ticker or "").upper(),
+                "latest": latest_operating(ticker),
+                "history": hist,
+                "count": len(hist),
+            }
+        )
+    except Exception as e:
+        logger.exception("api_operating failed for %s", ticker)
+        return jsonify({"error": str(e), "history": []}), 500
+
+
+@app.route("/api/supporting/exposures/<path:ticker>")
+def api_supporting_exposure(ticker):
+    """Stock vs official driver strip (energy_pilot / watchlist join)."""
+    try:
+        from data.supporting_series import build_exposure_row
+
+        row = build_exposure_row(ticker, include_stock=True, include_chart=True)
+        if not row:
+            return jsonify({"error": "no supporting-series exposure", "ticker": ticker}), 404
+        return jsonify({"driver": row, "ticker": row.get("ticker")})
+    except Exception as e:
+        logger.exception("api_supporting_exposure failed for %s", ticker)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/commodities/<commodity_id>/history")
+def api_commodities_history(commodity_id):
+    """Full cleaned history for one commodity id."""
+    try:
+        from data.commodity_prices import get_series, load_commodity_config
+        cfg = load_commodity_config()
+        meta = (cfg.get("commodities") or {}).get(commodity_id) or {}
+        series = get_series(commodity_id)
+        return jsonify({
+            "id": commodity_id,
+            "display": meta.get("display") or commodity_id,
+            "unit": meta.get("unit") or "",
+            "series": series,
+            "count": len(series),
+        })
+    except Exception as e:
+        logger.exception("api_commodities_history failed for %s", commodity_id)
+        return jsonify({"error": str(e), "series": []}), 500
+
+
+@app.route("/api/commodities/cost-history")
+def api_commodities_cost_history_status():
+    """Multi-period unit cost history status (all tickers)."""
+    try:
+        from data.unit_cost_history import cost_history_status
+        return jsonify(cost_history_status())
+    except Exception as e:
+        logger.exception("api cost history status failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/commodities/cost-history/scan", methods=["POST"])
+def api_commodities_cost_history_scan():
+    """Collect multi-period costs from ASX quarterlies + US SEC filings."""
+    try:
+        from data.unit_cost_history import collect_all_cost_history, cost_history_status
+        tickers_raw = (request.args.get("tickers") or "").strip()
+        if not tickers_raw and request.is_json and request.json:
+            tickers_raw = str(request.json.get("tickers") or "")
+        tickers = [t.strip() for t in tickers_raw.split(",") if t.strip()] or None
+        result = collect_all_cost_history(tickers=tickers)
+        return jsonify({"result": result, "status": cost_history_status()})
+    except Exception as e:
+        logger.exception("api cost history scan failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/indices/<index_id>")
+def api_index_detail(index_id):
+    """Full monthly price series (+ PE history when available) for one index."""
+    force = _bool_arg("force")
+    try:
+        from data.indices import get_index_detail
+        detail = get_index_detail(index_id, force=force)
+        if not detail:
+            return jsonify({"error": "Unknown index"}), 404
+        return jsonify(detail)
+    except Exception as e:
+        logger.exception("api_index_detail failed for %s", index_id)
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route("/api/stocks")
 def api_stocks():
     market = request.args.get("market", "asx")
     list_id = request.args.get("list", "")
-    full = request.args.get("full", "0").lower() in ("1", "true", "yes", "all")
-    force_yf = request.args.get("force_yf", "0").lower() in ("1", "true", "yes")
-    signals_only = request.args.get("signals_only", "0").lower() in ("1", "true", "yes")
+    full = _bool_arg("full")
+    force_yf = _bool_arg("force_yf")
+    signals_only = _bool_arg("signals_only")
+    fast = _bool_arg("fast")
     stocks = get_stocks_for_market(
-        market, full=full, force_yf=force_yf, list_id=list_id, signals_only=signals_only,
+        market,
+        full=full,
+        force_yf=force_yf,
+        list_id=list_id,
+        signals_only=signals_only,
+        fast=fast,
     )
     rank = request.args.get("rank", "1").lower() not in ("0", "false", "no")
-    if rank and stocks:
+    if rank and stocks and market != "watchlist":
         try:
             from data.wiki_bridge import enrich_stocks_with_opportunities
             stocks = enrich_stocks_with_opportunities(stocks)
         except Exception as e:
             logger.warning("Opportunity enrichment failed: %s", e)
+    elif market == "watchlist" and stocks:
+        # Light rank pass when scores already present from cache; skip heavy recompute
+        try:
+            from data.wiki_bridge import enrich_stocks_with_opportunities
+            stocks = enrich_stocks_with_opportunities(stocks)
+        except Exception as e:
+            logger.debug("Watchlist opportunity enrich: %s", e)
     meta = _get_market_meta(market, list_id=list_id)
     meta["full"] = bool(full)
     meta["force_yf"] = bool(force_yf)
     meta["list_id"] = list_id
     meta["signals_only"] = signals_only
+    meta["fast"] = bool(fast)
     meta["rank_enriched"] = rank
     meta["total_universe"] = meta.get("universe_count") or (len(stocks) if not full else None)
-    return jsonify({
-        "stocks": stocks,
-        "meta": meta
-    })
+    return jsonify({"stocks": stocks, "meta": meta})
+
+
+@app.route("/api/watchlist", methods=["GET"])
+def api_watchlist_get():
+    """List watchlist entries and optional stock rows."""
+    try:
+        from data.watchlist import fetch_watchlist_stocks, list_watchlist
+
+        entries = list_watchlist()
+        enrich = request.args.get("enrich", "1").lower() not in ("0", "false", "no")
+        stocks = fetch_watchlist_stocks() if enrich else []
+        return jsonify(
+            {
+                "entries": entries,
+                "stocks": stocks,
+                "tickers": [e["ticker"] for e in entries],
+                "count": len(entries),
+            }
+        )
+    except Exception as e:
+        logger.exception("api_watchlist_get failed")
+        return jsonify({"error": str(e), "entries": [], "stocks": []}), 500
+
+
+@app.route("/api/watchlist", methods=["POST"])
+def api_watchlist_add():
+    """Add ticker to watchlist. JSON: { ticker, name?, market?, notes? }."""
+    try:
+        from data.watchlist import add_ticker, is_watched
+
+        body = request.get_json(silent=True) or {}
+        ticker = (body.get("ticker") or request.args.get("ticker") or "").strip()
+        if not ticker:
+            return jsonify({"error": "ticker required"}), 400
+        entry = add_ticker(
+            ticker,
+            name=body.get("name") or "",
+            market=body.get("market") or "",
+            notes=body.get("notes") or "",
+        )
+        return jsonify({"ok": True, "entry": entry, "on_watchlist": is_watched(ticker)})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.exception("api_watchlist_add failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/watchlist/<path:ticker>", methods=["DELETE"])
+def api_watchlist_remove(ticker):
+    """Remove ticker from watchlist."""
+    try:
+        from data.watchlist import is_watched, remove_ticker
+
+        ok = remove_ticker(ticker)
+        return jsonify({"ok": ok, "ticker": (ticker or "").upper(), "on_watchlist": is_watched(ticker)})
+    except Exception as e:
+        logger.exception("api_watchlist_remove failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/score-weights", methods=["GET"])
+def api_score_weights_get():
+    """Current quant Score weights from config/opportunity_weights.yaml."""
+    try:
+        from scoring.quant_score import get_weights_public
+
+        return jsonify(get_weights_public())
+    except Exception as e:
+        logger.exception("api_score_weights_get failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/score-weights", methods=["POST", "PUT"])
+def api_score_weights_save():
+    """Update Score weights (component weights re-normalized to sum 1)."""
+    try:
+        from scoring.quant_score import save_weights
+
+        body = request.get_json(silent=True) or {}
+        # Accept flat body or { weights: {...} }
+        updates = body.get("weights") if isinstance(body.get("weights"), dict) else body
+        result = save_weights(updates or {})
+        return jsonify({"ok": True, **result})
+    except Exception as e:
+        logger.exception("api_score_weights_save failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/watchlist/alerts", methods=["GET"])
+def api_watchlist_alerts_get():
+    """Evaluate watchlist for 52w-low / Burry alerts; returns newly fired + active."""
+    try:
+        from data.watchlist_alerts import evaluate_watchlist_alerts, get_alert_prefs
+
+        evaluate = request.args.get("evaluate", "1").lower() not in ("0", "false", "no")
+        if evaluate:
+            result = evaluate_watchlist_alerts()
+        else:
+            result = {
+                "enabled": get_alert_prefs().get("enabled"),
+                "new_alerts": [],
+                "active": [],
+                "prefs": get_alert_prefs(),
+            }
+        return jsonify(result)
+    except Exception as e:
+        logger.exception("api_watchlist_alerts_get failed")
+        return jsonify({"error": str(e), "new_alerts": [], "active": []}), 500
+
+
+@app.route("/api/watchlist/alerts/prefs", methods=["GET", "POST"])
+def api_watchlist_alerts_prefs():
+    """Get or update watchlist alert preferences."""
+    try:
+        from data.watchlist_alerts import get_alert_prefs, set_alert_prefs
+
+        if request.method == "GET":
+            return jsonify({"prefs": get_alert_prefs()})
+        body = request.get_json(silent=True) or {}
+        prefs = body.get("prefs") if isinstance(body.get("prefs"), dict) else body
+        return jsonify({"ok": True, "prefs": set_alert_prefs(prefs or {})})
+    except Exception as e:
+        logger.exception("api_watchlist_alerts_prefs failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/stock/<path:ticker>/announcements")
+def api_stock_announcements(ticker):
+    """Latest company announcements with source URLs for the detail modal."""
+    try:
+        from data.company_announcements import get_announcements
+
+        market = request.args.get("market", "")
+        limit = _int_arg("limit", 15)
+        payload = get_announcements(ticker, market=market, limit=limit)
+        return jsonify(payload)
+    except Exception as e:
+        logger.exception("api_stock_announcements failed")
+        return jsonify(
+            {
+                "ticker": ticker,
+                "announcements": [],
+                "error": str(e),
+                "count": 0,
+            }
+        ), 500
 
 
 @app.route("/api/opportunities")
@@ -113,10 +726,10 @@ def api_opportunities():
     """Ranked opportunities: quant + vault qual overlay."""
     market = request.args.get("market", "buybacks")
     list_id = request.args.get("list", "")
-    force_yf = request.args.get("force_yf", "0").lower() in ("1", "true", "yes")
-    min_quant = float(request.args.get("min_quant", 0) or 0)
-    min_composite = float(request.args.get("min_composite", 0) or 0)
-    limit = int(request.args.get("limit", 50) or 50)
+    force_yf = _bool_arg("force_yf")
+    min_quant = _float_arg("min_quant", 0)
+    min_composite = _float_arg("min_composite", 0)
+    limit = _int_arg("limit", 50)
     stocks = get_stocks_for_market(market, force_yf=force_yf, list_id=list_id)
     try:
         from data.wiki_bridge import get_opportunities, load_registry
@@ -136,23 +749,27 @@ def api_opportunities():
         "meta": meta,
     })
 
+
 @app.route("/api/kpis")
 def api_kpis():
     market = request.args.get("market", "asx")
-    full = request.args.get("full", "0").lower() in ("1", "true", "yes", "all")
-    force_yf = request.args.get("force_yf", "0").lower() in ("1", "true", "yes")
+    full = _bool_arg("full")
+    force_yf = _bool_arg("force_yf")
     stocks = get_stocks_for_market(market, full=full, force_yf=force_yf)
     kpis = {
         "qualifying_stocks": len(stocks),
         "total_insider_buys": sum(s.get("insider_buys_2026", 0) for s in stocks),
         "companies_with_buybacks": sum(1 for s in stocks if s.get("buyback_announced")),
-        "avg_discount_52w": round(sum(s.get("pct_from_52w_low", 0) for s in stocks) / max(len(stocks), 1), 1),
+        "avg_discount_52w": round(
+            sum(s.get("pct_from_52w_low", 0) for s in stocks) / max(len(stocks), 1), 1
+        ),
         "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "meta": _get_market_meta(market)
+        "meta": _get_market_meta(market),
     }
     kpis["meta"]["full"] = bool(full)
     kpis["meta"]["force_yf"] = bool(force_yf)
     return jsonify(kpis)
+
 
 @app.route("/api/business/lists")
 def api_business_lists():
@@ -163,68 +780,129 @@ def api_business_lists():
         return jsonify({"lists": [], "error": str(e)}), 500
 
 
-@app.route("/api/stock/<ticker>")
+@app.route("/api/stock/<path:ticker>")
 def api_stock_detail(ticker):
-    market = request.args.get("market", "asx")
-    # For detail we do a targeted fresh lookup (fast for one ticker) + signals.
-    # This gives rich metrics even if the list view was using batch-only data.
-    t = (ticker or "").upper().replace(".AX", "")
-    if market.lower() in ("buybacks", "business"):
+    from data.watchlist import is_watched
+    from data.yf_helpers import sanitize_stock_figures
+
+    market = (request.args.get("market", "asx") or "asx").lower()
+    raw = (ticker or "").strip().upper()
+    t = raw.replace(".AX", "")
+
+    # Watchlist / ambiguous: route by symbol shape
+    if market == "watchlist":
+        if raw.endswith(".AX"):
+            market = "asx"
+        elif "." in raw:
+            market = "business"
+        else:
+            market = "us"
+
+    def _with_watch(s):
+        if not s:
+            return s
+        s = sanitize_stock_figures(s)
+        s["on_watchlist"] = is_watched(s.get("ticker") or raw)
+        try:
+            from data.supporting_series import attach_driver_detail
+
+            s = attach_driver_detail(s)
+        except Exception as e:
+            logger.debug("driver detail skipped for %s: %s", raw, e)
+        try:
+            from data.wiki_bridge import enrich_stock_opportunity
+
+            s = enrich_stock_opportunity(s, peers=[s])
+        except Exception as e:
+            logger.debug("detail score attach skipped for %s: %s", raw, e)
+            try:
+                from data.vault_memo import attach_memo_status
+
+                attach_memo_status(s)
+            except Exception:
+                pass
+        return s
+
+    if market in ("buybacks", "business"):
         try:
             from data.business_lists import _fetch_single_business
-            sym = (ticker or "").strip().upper()
+            sym = raw
             enriched = _fetch_single_business(sym)
             if enriched:
-                return jsonify(enriched)
+                return jsonify(_with_watch(enriched))
         except Exception as e:
-            logger.warning(f"Business detail failed for {ticker}: {e}")
+            logger.warning("Business detail failed for %s: %s", ticker, e)
         list_id = request.args.get("list", "")
-        market_key = "buybacks" if market.lower() == "buybacks" else "business"
+        market_key = "buybacks" if market == "buybacks" else "business"
         stocks = get_stocks_for_market(market_key, list_id=list_id)
         for s in stocks:
-            if s["ticker"].upper() == (ticker or "").upper():
-                return jsonify(s)
+            if s["ticker"].upper() == raw:
+                return jsonify(_with_watch(s))
         return jsonify({"error": "Not found"}), 404
 
-    if market.lower() == "us":
-        # US detail: prefer fresh rich data (with price trend + earnings)
+    if market == "us":
         try:
             from data.us import _fetch_single_us
             enriched = _fetch_single_us(t)
             if enriched:
-                return jsonify(enriched)
+                return jsonify(_with_watch(enriched))
         except Exception as e:
-            logger.warning(f"Targeted US detail failed for {t}: {e}")
+            logger.warning("Targeted US detail failed for %s: %s", t, e)
 
-        # Fallback to the (small) list data
         stocks = get_stocks_for_market("us")
         for s in stocks:
             if s["ticker"].upper().replace(".AX", "") == t:
-                return jsonify(s)
+                return jsonify(_with_watch(s))
         return jsonify({"error": "Not found"}), 404
 
-    # ASX detail: targeted
     try:
         from data.asx import _fetch_single_asx
         enriched = _fetch_single_asx(t)
         if enriched:
-            return jsonify(enriched)
+            return jsonify(_with_watch(enriched))
     except Exception as e:
-        logger.warning(f"Targeted ASX detail failed for {t}: {e}")
+        logger.warning("Targeted ASX detail failed for %s: %s", t, e)
 
-    # Fallback: scan the cached full list
     stocks = get_stocks_for_market("asx", full=True)
     for s in stocks:
         if s["ticker"].upper().replace(".AX", "") == t:
-            return jsonify(s)
+            return jsonify(_with_watch(s))
     return jsonify({"error": "Not found"}), 404
+
+
+@app.route("/api/vault/memo/<path:ticker>", methods=["GET"])
+def api_vault_memo_get(ticker):
+    """Does an opportunity memo exist in the local Obsidian vault?"""
+    try:
+        from data.vault_memo import memo_status
+
+        return jsonify(memo_status(ticker))
+    except Exception as e:
+        logger.exception("api_vault_memo_get failed")
+        return jsonify({"ok": False, "error": str(e), "ticker": ticker}), 500
+
+
+@app.route("/api/vault/memo/<path:ticker>", methods=["POST"])
+def api_vault_memo_post(ticker):
+    """Create the opportunity memo if missing; always push a screener snapshot."""
+    try:
+        from data.vault_memo import create_or_update_memo
+
+        body = request.get_json(silent=True) or {}
+        result = create_or_update_memo(ticker, stock=body, source="screener")
+        code = 200 if result.get("ok") else 400
+        return jsonify(result), code
+    except Exception as e:
+        logger.exception("api_vault_memo_post failed")
+        return jsonify({"ok": False, "error": str(e), "ticker": ticker}), 500
+
 
 @app.route("/api/refresh", methods=["POST"])
 def api_refresh():
     market = request.args.get("market", "asx")
     list_id = request.args.get("list", "")
-    full = request.args.get("full", "0").lower() in ("1", "true", "yes", "all")
-    force_yf = request.args.get("force_yf", "0").lower() in ("1", "true", "yes")
+    full = _bool_arg("full")
+    force_yf = _bool_arg("force_yf")
     if market == "business":
         from data.business_lists import _business_cache as biz_cache
         biz_cache.clear()
@@ -237,7 +915,7 @@ def api_refresh():
         msg = f"Buybacks registry refreshed ({len(stocks)} companies)"
     elif market == "us":
         from data.us import _us_cache as us_cache
-        from data.business_lists import _business_cache as biz_cache, BUILTIN_SP500_LIST_ID
+        from data.business_lists import BUILTIN_SP500_LIST_ID, _business_cache as biz_cache
         us_cache.clear()
         biz_cache.pop(BUILTIN_SP500_LIST_ID, None)
         stocks = fetch_us_stocks(force_yf=force_yf)
@@ -258,8 +936,19 @@ def api_refresh():
         "status": "ok",
         "message": msg,
         "stocks": stocks,
-        "meta": meta
+        "meta": meta,
     })
+
+
+def _buybacks_refresh_envelope(result: dict, ok_message: str, fail_default: str):
+    if not result.get("ok"):
+        err = result.get("error") or (result.get("build") or {}).get("error") or fail_default
+        return _json_error(err, result=result)
+    return _json_ok(
+        ok_message,
+        result=result,
+        meta=result.get("meta") or _get_market_meta("buybacks"),
+    )
 
 
 @app.route("/api/buybacks/refresh_hkex", methods=["POST"])
@@ -268,25 +957,16 @@ def api_buybacks_refresh_hkex():
     try:
         from data.buybacks import refresh_hkex_buybacks
         result = refresh_hkex_buybacks(download_gaps=True)
-        if not result.get("ok"):
-            return jsonify({
-                "status": "error",
-                "error": result.get("error") or result.get("build", {}).get("error", "HKEX refresh failed"),
-            }), 500
         dl = result.get("download") or {}
         build = result.get("build") or {}
-        return jsonify({
-            "status": "ok",
-            "message": (
-                f"HKEX data updated ({dl.get('downloaded', 0)} new files, "
-                f"{build.get('rows', result.get('rows', 0))} total rows)"
-            ),
-            "result": result,
-            "meta": result.get("meta") or _get_market_meta("buybacks"),
-        })
+        msg = (
+            f"HKEX data updated ({dl.get('downloaded', 0)} new files, "
+            f"{build.get('rows', result.get('rows', 0))} total rows)"
+        )
+        return _buybacks_refresh_envelope(result, msg, "HKEX refresh failed")
     except Exception as e:
         logger.exception("buybacks refresh_hkex failed")
-        return jsonify({"status": "error", "error": str(e)}), 500
+        return _json_error(str(e))
 
 
 @app.route("/api/buybacks/refresh_hk_insider", methods=["POST"])
@@ -295,25 +975,16 @@ def api_buybacks_refresh_hk_insider():
     try:
         from data.buybacks import refresh_hk_insider_buybacks
         result = refresh_hk_insider_buybacks(download_gaps=True)
-        if not result.get("ok"):
-            return jsonify({
-                "status": "error",
-                "error": result.get("error") or result.get("build", {}).get("error", "HK insider refresh failed"),
-            }), 500
         dl = result.get("download") or {}
         build = result.get("build") or {}
-        return jsonify({
-            "status": "ok",
-            "message": (
-                f"HK insider data updated ({dl.get('downloaded', 0)} new files, "
-                f"{build.get('rows', result.get('rows', 0))} total rows)"
-            ),
-            "result": result,
-            "meta": result.get("meta") or _get_market_meta("buybacks"),
-        })
+        msg = (
+            f"HK insider data updated ({dl.get('downloaded', 0)} new files, "
+            f"{build.get('rows', result.get('rows', 0))} total rows)"
+        )
+        return _buybacks_refresh_envelope(result, msg, "HK insider refresh failed")
     except Exception as e:
         logger.exception("buybacks refresh_hk_insider failed")
-        return jsonify({"status": "error", "error": str(e)}), 500
+        return _json_error(str(e))
 
 
 @app.route("/api/buybacks/refresh_asx", methods=["POST"])
@@ -322,8 +993,8 @@ def api_buybacks_refresh_asx():
     """Paginated ASX market ingest + PDF-refine insider purchases + buyback announcements."""
     try:
         from data.buybacks import refresh_asx_buybacks_data
-        backfill = request.args.get("backfill", "0").lower() in ("1", "true", "yes")
-        incremental = request.args.get("incremental", "1").lower() in ("1", "true", "yes")
+        backfill = _bool_arg("backfill")
+        incremental = _bool_arg("incremental", default=True)
         if backfill:
             incremental = False
         result = refresh_asx_buybacks_data(
@@ -332,27 +1003,18 @@ def api_buybacks_refresh_asx():
             incremental=incremental,
             backfill=backfill,
         )
-        if not result.get("ok"):
-            return jsonify({
-                "status": "error",
-                "error": result.get("error", "ASX refresh failed"),
-            }), 500
         refine = result.get("refine") or {}
         ingest = result.get("ingest") or {}
-        return jsonify({
-            "status": "ok",
-            "message": (
-                f"ASX data updated ({result.get('total_buybacks', 0)} buybacks, "
-                f"{result.get('total_purchases', 0)} insider purchases, "
-                f"{ingest.get('pages_fetched', 0)} pages fetched, "
-                f"{refine.get('pdf_checked', 0)} PDF-checked)"
-            ),
-            "result": result,
-            "meta": result.get("meta") or _get_market_meta("buybacks"),
-        })
+        msg = (
+            f"ASX data updated ({result.get('total_buybacks', 0)} buybacks, "
+            f"{result.get('total_purchases', 0)} insider purchases, "
+            f"{ingest.get('pages_fetched', 0)} pages fetched, "
+            f"{refine.get('pdf_checked', 0)} PDF-checked)"
+        )
+        return _buybacks_refresh_envelope(result, msg, "ASX refresh failed")
     except Exception as e:
         logger.exception("buybacks refresh_asx failed")
-        return jsonify({"status": "error", "error": str(e)}), 500
+        return _json_error(str(e))
 
 
 @app.route("/api/buybacks/refresh_us/status", methods=["GET"])
@@ -363,7 +1025,7 @@ def api_buybacks_refresh_us_status():
         return jsonify(get_us_sec_refresh_status())
     except Exception as e:
         logger.exception("buybacks refresh_us status failed")
-        return jsonify({"status": "error", "error": str(e)}), 500
+        return _json_error(str(e))
 
 
 @app.route("/api/buybacks/refresh_us", methods=["POST"])
@@ -384,10 +1046,10 @@ def api_buybacks_refresh_us():
                 "meta": _get_market_meta("buybacks"),
             })
 
-        days = int(request.args.get("days", 365))
-        max_tickers = request.args.get("max_tickers")
-        max_tickers = int(max_tickers) if max_tickers else None
-        reparse_10q = request.args.get("reparse_10q", "0").lower() in ("1", "true", "yes")
+        days = _int_arg("days", 365)
+        max_tickers_raw = request.args.get("max_tickers")
+        max_tickers = int(max_tickers_raw) if max_tickers_raw else None
+        reparse_10q = _bool_arg("reparse_10q")
 
         if not mark_us_sec_refresh_started(max_tickers=max_tickers):
             return jsonify({
@@ -397,20 +1059,15 @@ def api_buybacks_refresh_us():
                 "meta": _get_market_meta("buybacks"),
             })
 
-        def _bg():
-            try:
-                refresh_us_buybacks_data(
-                    days=days,
-                    max_tickers=max_tickers,
-                    reparse_10q=reparse_10q,
-                )
-                logger.info("Background US SEC buybacks scan finished.")
-            except Exception as ex:
-                logger.exception("US SEC buybacks scan error: %s", ex)
+        def _job():
+            refresh_us_buybacks_data(
+                days=days,
+                max_tickers=max_tickers,
+                reparse_10q=reparse_10q,
+            )
+            logger.info("Background US SEC buybacks scan finished.")
 
-        import threading
-        threading.Thread(target=_bg, daemon=True).start()
-        progress = get_us_sec_refresh_status()
+        _run_background(_job)
         return jsonify({
             "status": "started",
             "message": (
@@ -418,12 +1075,12 @@ def api_buybacks_refresh_us():
                 f"8-K/10-Q buybacks + Form 4 insider, last {days} days). "
                 "Progress updates on the Buybacks tab."
             ),
-            "progress": progress,
+            "progress": get_us_sec_refresh_status(),
             "meta": _get_market_meta("buybacks"),
         })
     except Exception as e:
         logger.exception("buybacks refresh_us failed")
-        return jsonify({"status": "error", "error": str(e)}), 500
+        return _json_error(str(e))
 
 
 @app.route("/api/buybacks/refresh_jpx", methods=["POST"])
@@ -432,17 +1089,14 @@ def api_buybacks_refresh_jpx():
     try:
         from data.buybacks import refresh_jpx_buybacks
         result = refresh_jpx_buybacks(fetch_yfinance=False)
-        if not result.get("ok"):
-            return jsonify({"status": "error", "error": result.get("error", "JPX scrape failed")}), 500
-        return jsonify({
-            "status": "ok",
-            "message": f"JPX data merged ({result.get('scraped', 0)} scraped, {result.get('total', 0)} total rows)",
-            "result": result,
-            "meta": result.get("meta") or _get_market_meta("buybacks"),
-        })
+        msg = (
+            f"JPX data merged ({result.get('scraped', 0)} scraped, "
+            f"{result.get('total', 0)} total rows)"
+        )
+        return _buybacks_refresh_envelope(result, msg, "JPX scrape failed")
     except Exception as e:
         logger.exception("buybacks refresh_jpx failed")
-        return jsonify({"status": "error", "error": str(e)}), 500
+        return _json_error(str(e))
 
 
 @app.route("/api/buybacks/rebuild_yf/status", methods=["GET"])
@@ -453,7 +1107,7 @@ def api_buybacks_rebuild_yf_status():
         return jsonify(get_yf_rebuild_status())
     except Exception as e:
         logger.exception("buybacks rebuild_yf status failed")
-        return jsonify({"status": "error", "error": str(e)}), 500
+        return _json_error(str(e))
 
 
 @app.route("/api/buybacks/rebuild_yf", methods=["POST"])
@@ -476,23 +1130,19 @@ def api_buybacks_rebuild_yf():
 
         bb_cache.clear()
 
-        def _bg():
-            try:
-                rebuild_buybacks_yf_cache()
-                logger.info("Background buybacks YF rebuild finished.")
-            except Exception as ex:
-                logger.exception("Buybacks YF rebuild error: %s", ex)
+        def _job():
+            rebuild_buybacks_yf_cache()
+            logger.info("Background buybacks YF rebuild finished.")
 
-        import threading
-        threading.Thread(target=_bg, daemon=True).start()
-        return jsonify({
-            "status": "started",
-            "message": "YF rebuild started for buybacks registry. Table refreshes every 25 symbols.",
-            "meta": _get_market_meta("buybacks"),
-        })
+        _run_background(_job)
+        return _json_ok(
+            "YF rebuild started for buybacks registry. Table refreshes every 25 symbols.",
+            meta=_get_market_meta("buybacks"),
+            status="started",
+        )
     except Exception as e:
         logger.exception("buybacks rebuild_yf failed")
-        return jsonify({"status": "error", "error": str(e)}), 500
+        return _json_error(str(e))
 
 
 @app.route("/api/business/rebuild_yf", methods=["POST"])
@@ -500,38 +1150,34 @@ def api_business_rebuild_yf():
     """Force sequential yfinance refresh for a business list CSV."""
     list_id = request.args.get("list", "")
     if not list_id:
-        return jsonify({"status": "error", "error": "list parameter required"}), 400
+        return _json_error("list parameter required", 400)
     try:
         from data.business_lists import _business_cache as biz_cache, rebuild_business_yf_cache
         biz_cache.clear()
 
-        def _bg():
-            try:
-                rebuild_business_yf_cache(list_id)
-                logger.info("Background business YF rebuild finished.")
-            except Exception as ex:
-                logger.exception("Business YF rebuild error: %s", ex)
+        def _job():
+            rebuild_business_yf_cache(list_id)
+            logger.info("Background business YF rebuild finished.")
 
-        import threading
-        threading.Thread(target=_bg, daemon=True).start()
+        _run_background(_job)
         return jsonify({
             "status": "started",
-            "message": f"YF rebuild started for business list '{list_id}'. Watch server logs for 'business yf progress'.",
+            "message": (
+                f"YF rebuild started for business list '{list_id}'. "
+                "Watch server logs for 'business yf progress'."
+            ),
             "meta": _get_market_meta("business", list_id=list_id),
         })
     except Exception as e:
         logger.exception("business rebuild_yf failed")
-        return jsonify({"status": "error", "error": str(e)}), 500
+        return _json_error(str(e))
 
 
 @app.route("/api/asx/update_universe", methods=["POST"])
 def api_update_asx_universe():
-    """Trigger a refresh of the full ASX listed companies list from the official directory CSV.
-    Intended to be run manually ~once every 6 months. Returns stats; follow with a data Refresh.
-    """
+    """Refresh full ASX listed companies list from the official directory CSV."""
     try:
         result = update_asx_company_list(force=True)
-        # Clear the data cache so next load sees fresh universe for filtering
         try:
             from data.asx import _asx_cache as asx_c
             asx_c.clear()
@@ -544,41 +1190,40 @@ def api_update_asx_universe():
 
 @app.route("/api/asx/rebuild_yf", methods=["POST"])
 def api_rebuild_yf():
-    """Force a full sequential yfinance refresh for the current ASX universe.
-    This is *one call at a time* with long sleeps and can take 1-3+ hours for ~2000
-    tickers. Run only every 2-4 weeks.
-    The work runs in a background thread so this HTTP call returns quickly; watch the
-    server console (the python app.py process) for progress like 'yf sequential progress: 50/1979'.
-    Prefer the CLI for the heaviest runs:
-      python -c \"from data.asx import rebuild_asx_yf_cache; rebuild_asx_yf_cache()\"
-    """
+    """Force full sequential yfinance refresh for the ASX universe (background)."""
     market = request.args.get("market", "asx")
-    full = request.args.get("full", "1").lower() in ("1", "true", "yes", "all")
+    full = _bool_arg("full", default=True)
     try:
         from data.asx import _asx_cache as asx_c
         asx_c.clear()
 
-        def _bg_rebuild():
-            try:
-                get_stocks_for_market(market, full=full, force_yf=True)
-                logger.info('Background YF rebuild finished.')
-            except Exception as ex:
-                logger.exception('Background YF rebuild error: %s', ex)
+        def _job():
+            get_stocks_for_market(market, full=full, force_yf=True)
+            logger.info("Background YF rebuild finished.")
 
-        import threading
-        threading.Thread(target=_bg_rebuild, daemon=True).start()
-
+        _run_background(_job)
         return jsonify({
             "status": "started",
-            "message": "YF rebuild started in background thread (sequential, slow). Monitor the server console/logs for 'yf sequential progress'. It will update the persistent cache.",
-            "meta": _get_market_meta(market)
+            "message": (
+                "YF rebuild started in background thread (sequential, slow). "
+                "Monitor the server console/logs for 'yf sequential progress'."
+            ),
+            "meta": _get_market_meta(market),
         })
     except Exception as e:
         logger.exception("rebuild_yf start failed")
-        return jsonify({"status": "error", "error": str(e)}), 500
+        return _json_error(str(e))
 
 
 if __name__ == "__main__":
-    print("Multi-Market Signal Screener")
-    print("→ Open http://127.0.0.1:5000")
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    host = os.environ.get("SCREENER_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    port = int(os.environ.get("SCREENER_PORT", "5000") or 5000)
+    debug = os.environ.get("FLASK_DEBUG", os.environ.get("SCREENER_DEBUG", "")).strip().lower() in _TRUE_VALUES
+    print("Multi-Market Signal Screener (personal / local)")
+    print(f"→ Open http://{host}:{port}")
+    if host in ("0.0.0.0", "::"):
+        print("WARNING: listening on all interfaces — keep SCREENER_ALLOW_REMOTE unset "
+              "and prefer SCREENER_HOST=127.0.0.1")
+    if debug:
+        print("WARNING: debug mode enabled (FLASK_DEBUG=1) — do not expose to the network")
+    app.run(host=host, port=port, debug=debug, threaded=True)

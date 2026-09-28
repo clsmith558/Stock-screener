@@ -36,70 +36,19 @@ YF_FETCH_SLEEP_SECONDS = 2.0  # One call at a time to avoid rate limits. Full ~2
 _asx_cache = {}
 ASX_CACHE_TTL = 600  # 10 minutes
 
-
-def _safe_float(val, default=0.0):
-    """Coerce yfinance info values (sometimes strings) to float."""
-    if val is None:
-        return default
-    if isinstance(val, bool):
-        return default
-    if isinstance(val, (int, float)):
-        return float(val)
-    if isinstance(val, str):
-        s = val.strip().replace(",", "")
-        if not s or s.lower() in ("n/a", "na", "none", "-", "inf", "infinity"):
-            return default
-        try:
-            return float(s)
-        except ValueError:
-            return default
-    try:
-        return float(val)
-    except (TypeError, ValueError):
-        return default
-
-
-def _safe_round(val, ndigits=1, default=0):
-    f = _safe_float(val, None)
-    if f is None:
-        return default
-    try:
-        return int(round(f)) if ndigits == 0 else round(f, ndigits)
-    except (TypeError, ValueError):
-        return default
-
-
-def _normalize_div_yield(val) -> float:
-    """yfinance dividendYield: decimal (0.06) on US, often already % (6.0) on ASX."""
-    v = _safe_float(val)
-    if not v:
-        return 0
-    if v > 0.5:
-        return _safe_round(v, 2)
-    return _safe_round(v * 100, 2)
-
-
-def _business_summary(info: dict) -> str:
-    info = info or {}
-    return (info.get("longBusinessSummary") or info.get("description") or "").strip()
-
-
-def _build_price_trend(yt, period: str = "2y", interval: str = "1wk") -> list:
-    """Weekly/daily closes for interactive price chart in detail modal."""
-    price_trend = []
-    try:
-        hist = yt.history(period=period, interval=interval, auto_adjust=True)
-        if hist is not None and not hist.empty:
-            for dt, row in hist.iterrows():
-                c = row.get("Close") or row.get("Adj Close")
-                if c is not None and c == c:
-                    price_trend.append({
-                        "date": dt.strftime("%Y-%m-%d"),
-                        "close": round(float(c), 2),
-                    })
-    except Exception:
-        pass
-    return price_trend
+# Shared helpers (re-exported under legacy names for existing imports)
+from data.yf_helpers import (  # noqa: E402
+    business_summary as _business_summary,
+    build_price_trend as _build_price_trend,
+    calc_p_fcf as _calc_p_fcf,
+    normalize_div_yield as _normalize_div_yield,
+    pct_from_52w_low as _pct_from_52w_low,
+    quote_price as _quote_price,
+    reconcile_52w_range as _reconcile_52w_range,
+    safe_float as _safe_float,
+    safe_round as _safe_round,
+    sanitize_stock_figures as _sanitize_stock_figures,
+)
 
 
 def _build_earnings_history(yt) -> list:
@@ -164,26 +113,41 @@ _SUFFIX_CURRENCY = {
 
 
 def infer_currency(info: dict = None, ticker: str = "") -> str:
-    """Resolve trading/reporting currency from yfinance info or ticker suffix."""
+    """
+    Display / market-cap currency (trading quote currency).
+
+    Prefer info.currency over financialCurrency so labels match marketCap and price.
+    Fundamentals in financialCurrency are converted in _metrics_from_yf_info.
+    """
     info = info or {}
-    for key in ("currency", "financialCurrency"):
-        cur = str(info.get(key) or "").strip().upper()
-        if cur and cur not in ("NONE", "NULL"):
-            return cur
+    cur = str(info.get("currency") or "").strip().upper()
+    if cur and cur not in ("NONE", "NULL", "N/A", "NA"):
+        return cur
     sym = (ticker or "").upper()
-    for sfx, cur in _SUFFIX_CURRENCY.items():
+    for sfx, c in _SUFFIX_CURRENCY.items():
         if sym.endswith(sfx):
-            return cur
+            return c
+    # Last resort: financialCurrency (native BS filers with no separate quote ccy)
+    fin = str(info.get("financialCurrency") or "").strip().upper()
+    if fin and fin not in ("NONE", "NULL", "N/A", "NA"):
+        return fin
     return "USD"
 
 
-def _net_assets_raw(info: dict, mcap: int = 0) -> float:
-    """Shareholders' equity (net assets) in raw currency units."""
+def _net_assets_raw(info: dict, mcap: int = 0, fx_to_quote: float = 1.0) -> float:
+    """
+    Shareholders' equity in *quote* currency units.
+
+    totalStockholderEquity is typically financialCurrency → apply fx_to_quote.
+    bookValue × shares is usually already in quote currency when priceToBook
+    is consistent with the trading price (common for ADRs).
+    """
     info = info or {}
+    scale = _safe_float(fx_to_quote, 1.0) or 1.0
     for key in ("totalStockholderEquity", "totalEquityGrossMinorityInterest"):
         val = _safe_float(info.get(key))
         if val > 0:
-            return val
+            return val * scale
     bv = _safe_float(info.get("bookValue"))
     shares = _safe_float(info.get("sharesOutstanding")) or _safe_float(info.get("impliedSharesOutstanding"))
     if bv > 0 and shares > 0:
@@ -212,12 +176,35 @@ def _net_assets_vs_mcap_metrics(net_assets: float, mcap: int) -> dict:
 
 
 def _metrics_from_yf_info(info: dict, price: float, ma_200w=0, pct_from_200w_ma=0, p_fcf=0, ticker: str = "") -> dict:
-    """Build metrics dict from yfinance .info, tolerant of string/null fields."""
+    """
+    Build metrics dict from yfinance .info, tolerant of string/null fields.
+
+    Aligns cash / debt / FCF / equity-from-totals into the *quote* currency
+    (same units as marketCap and price) when financialCurrency differs.
+    """
+    from data.yf_helpers import (
+        calc_enterprise_value,
+        calc_fcf_metrics,
+        calc_leverage_metrics,
+        calc_p_fcf,
+        financial_to_quote_fx,
+        normalize_growth_rate,
+    )
+
     info = info or {}
+    fx = financial_to_quote_fx(info, ticker)
+    fx_scale = _safe_float(fx.get("fx_to_quote"), 1.0) or 1.0
+    quote_ccy = fx.get("quote_currency") or infer_currency(info, ticker)
+    fin_ccy = fx.get("financial_currency") or quote_ccy
+
     pe = _safe_float(info.get("trailingPE")) or _safe_float(info.get("forwardPE"))
     pb = _safe_float(info.get("priceToBook"))
-    cash = _safe_float(info.get("totalCash")) / 1_000_000
-    debt = _safe_float(info.get("totalDebt")) / 1_000_000
+    # Absolute BS / CF amounts: Yahoo often leaves these in financialCurrency
+    total_cash = _safe_float(info.get("totalCash")) * fx_scale
+    total_debt = _safe_float(info.get("totalDebt")) * fx_scale
+    fcf_raw = _safe_float(info.get("freeCashflow")) * fx_scale
+    cash = total_cash / 1_000_000
+    debt = total_debt / 1_000_000
     net_cash_m = cash - debt
     dte = _safe_float(info.get("debtToEquity"))
     roe = _safe_float(info.get("returnOnEquity"))
@@ -227,31 +214,119 @@ def _metrics_from_yf_info(info: dict, price: float, ma_200w=0, pct_from_200w_ma=
     net_cash_pct_mcap = 0.0
     if mcap > 0:
         net_cash_pct_mcap = _safe_round((net_cash_m * 1_000_000) / mcap * 100, 2)
-    na_metrics = _net_assets_vs_mcap_metrics(_net_assets_raw(info, mcap), mcap)
-    currency = infer_currency(info, ticker)
+        # Absurd ratios = tiny/wrong mcap or residual unit glitch (see currency audit)
+        if abs(net_cash_pct_mcap) > 500:
+            net_cash_pct_mcap = 0.0
+    na_metrics = _net_assets_vs_mcap_metrics(
+        _net_assets_raw(info, mcap, fx_to_quote=fx_scale), mcap
+    )
+    industry = (info.get("industry") or info.get("industryDisp") or "").strip()
+
+    # EV = mcap − cash + debt (all quote currency)
+    enterprise_value = calc_enterprise_value(mcap, total_cash, total_debt)
+    ev_m = _safe_round(enterprise_value / 1_000_000, 0) if enterprise_value else 0
+    net_debt_m = _safe_round(-net_cash_m, 0)
+    debt_to_mcap = _safe_round(total_debt / mcap, 3) if mcap > 0 and total_debt else 0
+    ocf_raw = _safe_float(info.get("operatingCashflow")) * fx_scale
+    capex_raw = _safe_float(info.get("capitalExpenditures")) * fx_scale
+    fcf_bits = calc_fcf_metrics(
+        info,
+        mcap=mcap,
+        enterprise_value=enterprise_value,
+        ticker=ticker,
+        fcf_override=fcf_raw,
+        ocf_override=ocf_raw,
+        capex_override=capex_raw,
+    )
+    # Prefer recomputed EV/EBITDA when we converted cash (Yahoo EV is often nonsense)
+    ebitda = _safe_float(info.get("ebitda")) * fx_scale
+    yf_ev_ebitda = _safe_float(info.get("enterpriseToEbitda"))
+    if enterprise_value and ebitda > 0:
+        ev_ebitda = _safe_round(enterprise_value / ebitda, 1)
+    elif not fx.get("currency_converted") and yf_ev_ebitda:
+        ev_ebitda = _safe_round(yf_ev_ebitda, 1)
+    else:
+        ev_ebitda = _safe_round(yf_ev_ebitda, 1) if yf_ev_ebitda and yf_ev_ebitda > 0 else 0
+    lev = calc_leverage_metrics(
+        total_debt=total_debt,
+        total_cash=total_cash,
+        mcap=mcap,
+        enterprise_value=enterprise_value,
+        ev_ebitda=ev_ebitda,
+        net_assets=_safe_float(na_metrics.get("net_assets_m")) * 1_000_000,
+        price_to_book=pb,
+    )
+
+    # Recompute P/FCF with converted FCF when caller passed pre-conversion p_fcf
+    p_fcf_aligned = calc_p_fcf(info, price, ticker=ticker) if price else p_fcf
+    if p_fcf_aligned:
+        p_fcf = p_fcf_aligned
+
+    # Growth for PEG / long-horizon P/E (optional; often missing)
+    growth_dec = normalize_growth_rate(info.get("earningsGrowth"))
+    if growth_dec is None:
+        growth_dec = normalize_growth_rate(info.get("earningsQuarterlyGrowth"))
+    earnings_growth_pct = _safe_round(growth_dec * 100, 1) if growth_dec is not None else 0
+    # PEG = P/E ÷ earnings growth % (e.g. PE 15 / 10% growth → 1.5). Show only when available.
+    peg = 0.0
+    if pe and pe > 0 and growth_dec and growth_dec > 0:
+        peg = _safe_round(pe / (growth_dec * 100), 2)
+    if not peg or peg <= 0:
+        yf_peg = _safe_float(info.get("pegRatio")) or _safe_float(info.get("trailingPegRatio"))
+        if yf_peg and yf_peg > 0:
+            peg = _safe_round(yf_peg, 2)
+
     return {
         "pe": _safe_round(pe, 1),
         "forward_pe": _safe_round(info.get("forwardPE"), 1),
         "pb": _safe_round(pb, 2),
         "p_fcf": p_fcf,
         "pcf": 0,
-        "ev_ebitda": _safe_round(info.get("enterpriseToEbitda"), 1),
+        "ev_ebitda": ev_ebitda,
+        "enterprise_value": int(enterprise_value) if enterprise_value else 0,
+        "ev_m": ev_m,
         "debt_to_equity": _safe_round(dte / 100, 2) if dte else 0,
+        "debt_to_mcap": debt_to_mcap,
+        "net_debt_to_equity": lev["net_debt_to_equity"],
+        "ebitda_est_m": lev["ebitda_est_m"],
+        "debt_to_ebitda": lev["debt_to_ebitda"],
         "cash_on_hand_m": _safe_round(cash, 0),
         "net_cash_m": _safe_round(net_cash_m, 0),
+        "net_debt_m": net_debt_m,
         "net_cash_pct_mcap": net_cash_pct_mcap,
         "net_assets_m": na_metrics["net_assets_m"],
         "net_assets_vs_mcap_m": na_metrics["net_assets_vs_mcap_m"],
         "net_assets_vs_mcap_pct": na_metrics["net_assets_vs_mcap_pct"],
-        "currency": currency,
+        "currency": quote_ccy,
+        "financial_currency": fin_ccy,
+        "fx_to_quote": _safe_round(fx_scale, 6) if fx.get("currency_converted") else 1.0,
+        "currency_converted": bool(fx.get("currency_converted")),
+        "industry": industry,
         "roe": _safe_round(roe * 100, 1) if roe else 0,
         "insider_ownership_pct": insider_ownership_pct,
         "roic": 0,
-        "fcf_yield": 0,
+        "fcf_m": fcf_bits["fcf_m"],
+        "ocf_m": fcf_bits.get("ocf_m") or 0,
+        "capex_m": fcf_bits.get("capex_m") or 0,
+        "fcf_yield": fcf_bits["fcf_yield"],
+        "ev_fcf": fcf_bits["ev_fcf"],
+        "fcf_quality": fcf_bits.get("fcf_quality") or "unknown",
+        "fcf_ocf_ratio": fcf_bits.get("fcf_ocf_ratio"),
+        "capex_ocf_ratio": fcf_bits.get("capex_ocf_ratio"),
+        "earnings_growth_pct": earnings_growth_pct,
+        "peg": peg,
         "div_yield": _normalize_div_yield(info.get("dividendYield")),
         "market_cap": mcap,
         "ma_200w": ma_200w,
         "pct_from_200w_ma": pct_from_200w_ma,
+        "last_52w_low_date": None,
+        "days_since_52w_low": None,
+        "own_hist_weeks": 0,
+        "own_hist_pb_pctile": None,
+        "own_hist_pfcf_pctile": None,
+        "own_hist_fcf_yield_pctile": None,
+        "own_hist_cheap": False,
+        "own_hist_label": "unknown",
     }
 
 
@@ -274,6 +349,13 @@ def _calc_ma200w_gap(yt, price=None):
     except Exception:
         pass
     return 0, 0
+
+
+def _calc_last_52w_low(yt) -> dict:
+    """Most recent date of the trailing 52-week low (daily). See yf_helpers.calc_last_52w_low_metrics."""
+    from data.yf_helpers import calc_last_52w_low_metrics
+
+    return calc_last_52w_low_metrics(yt)
 
 
 # ---------------------- UNIVERSE (CSV) MANAGEMENT ----------------------
@@ -733,16 +815,41 @@ def _fetch_yf_data_sequentially(
     if total == 0:
         logger.info("Sequential yfinance fetch: no active tickers to fetch (all inactive or empty).")
         return out
-    logger.info(f"Sequential yfinance fetch starting for {total} active tickers (sleep={sleep_seconds}s per call)...")
+    if progress_every is None or progress_every < 1:
+        progress_every = 10
+    progress_every = min(progress_every, 25)
+    est_min = (total * float(sleep_seconds)) / 60.0
+    logger.info(
+        "Sequential yfinance fetch starting for %d tickers (sleep=%.1fs, ~%.0f min)",
+        total,
+        sleep_seconds,
+        est_min,
+    )
+    t0 = time.monotonic()
+    done_ok = 0
     for i, t in enumerate(base_tickers):
+        n = i + 1
         if t in inactive_skip:
             continue
-        if i and i % progress_every == 0:
-            logger.info(f"  yf sequential progress: {i}/{total}")
+        if n == 1 or n % progress_every == 0 or n == total:
+            elapsed = time.monotonic() - t0
+            rate = done_ok / elapsed if elapsed > 1 else 0
+            remain = total - n
+            eta_min = (remain / rate / 60.0) if rate > 0 else (remain * sleep_seconds / 60.0)
+            logger.info(
+                "  yf sequential progress: %d/%d (%.0f%%) ok=%d elapsed=%.0fs eta~%.0fmin now=%s",
+                n,
+                total,
+                100.0 * n / total,
+                done_ok,
+                elapsed,
+                eta_min,
+                t,
+            )
         try:
             yt = yf.Ticker(f"{t}.AX")
             info = yt.info or {}
-            price = _safe_float(info.get("currentPrice")) or _safe_float(info.get("regularMarketPrice"))
+            price = _quote_price(info)
 
             if price <= 0:
                 reason = _detect_yf_inactive(info, price) or "quote_not_found"
@@ -754,20 +861,24 @@ def _fetch_yf_data_sequentially(
 
             low = _safe_float(info.get("fiftyTwoWeekLow"))
             high = _safe_float(info.get("fiftyTwoWeekHigh"))
-
-            p_fcf = 0
-            try:
-                fcf = _safe_float(info.get("freeCashflow"))
-                shares = _safe_float(info.get("sharesOutstanding")) or _safe_float(info.get("impliedSharesOutstanding"))
-                if price and fcf and shares > 0:
-                    fps = fcf / shares
-                    if fps > 0:
-                        p_fcf = _safe_round(price / fps, 1)
-            except Exception:
-                pass
+            p_fcf = _calc_p_fcf(info, price, ticker=t)
 
             ma_200w, pct_from_200w_ma = _calc_ma200w_gap(yt, price)
+            low52 = _calc_last_52w_low(yt)
             metrics = _metrics_from_yf_info(info, price, ma_200w, pct_from_200w_ma, p_fcf, ticker=t)
+            metrics["last_52w_low_date"] = low52.get("last_52w_low_date")
+            metrics["days_since_52w_low"] = low52.get("days_since_52w_low")
+            p_fcf = metrics.get("p_fcf") or p_fcf
+            from data.yf_helpers import calc_own_history_cheapness, calc_rsi_metrics
+            own = calc_own_history_cheapness(
+                yt,
+                price=price,
+                pb=metrics.get("pb") or 0,
+                p_fcf=p_fcf or 0,
+                fcf_yield=metrics.get("fcf_yield") or 0,
+            )
+            metrics.update(own)
+            metrics.update(calc_rsi_metrics(yt, with_series=False))
 
             data = {
                 "price": _safe_round(price, 2),
@@ -775,6 +886,7 @@ def _fetch_yf_data_sequentially(
                 "high_52w": _safe_round(high, 2),
                 "name": info.get("shortName") or info.get("longName") or t,
                 "sector": info.get("sector") or "Unknown",
+                "industry": info.get("industry") or info.get("industryDisp") or metrics.get("industry") or "",
                 "metrics": metrics,
                 "p_fcf": p_fcf
             }
@@ -782,6 +894,7 @@ def _fetch_yf_data_sequentially(
             save_yf_data(t, data)
             remove_inactive_ticker(t)
             inactive_skip.discard(t)
+            done_ok += 1
             time.sleep(sleep_seconds)
         except Exception as e:
             msg = str(e)
@@ -790,13 +903,18 @@ def _fetch_yf_data_sequentially(
             if inactive_reason:
                 mark_ticker_inactive(t, inactive_reason, source="yf_error")
                 inactive_skip.add(t)
-                logger.info(f"  {t}: inactive ({inactive_reason}) from yf error — added to skip list")
+                logger.info(f"  {t}: inactive ({inactive_reason}) from yf error - added to skip list")
             else:
                 logger.info(f"  {t}: transient error, will retry on next stale cycle (not marking inactive)")
             # Be extra nice on rate limits / errors
             sleep = 30 if 'Rate' in msg or 'Too Many' in msg or '429' in msg else max(1.0, sleep_seconds / 2)
             time.sleep(sleep)
-    logger.info(f"Sequential yf fetch complete for {len(out)} / {total} tickers.")
+    logger.info(
+        "Sequential yf fetch complete: saved %d / %d in %.0fs",
+        len(out),
+        total,
+        time.monotonic() - t0,
+    )
     return out
 
 
@@ -964,9 +1082,8 @@ def fetch_asx_stocks(full: bool = False, force_yf: bool = False):
             m = ydat.get("metrics", {}) or {}
             p_fcf = ydat.get("p_fcf", m.get("p_fcf", 0) or 0)
 
-            pct_from_low = 0.0
-            if price and low and low > 0:
-                pct_from_low = round(((price - low) / low) * 100, 1)
+            low, high = _reconcile_52w_range(price, low, high)
+            pct_from_low = _pct_from_52w_low(price, low)
 
             real_signals = signals_by_ticker.get(ticker, [])
             insider_count = len([s for s in real_signals if s.get("type") == "insider"])
@@ -1003,6 +1120,8 @@ def fetch_asx_stocks(full: bool = False, force_yf: bool = False):
                 "buyback_date": None,
                 "pct_from_52w_low": pct_from_low,
                 "pct_from_200w_ma": m.get("pct_from_200w_ma", 0),
+                "last_52w_low_date": m.get("last_52w_low_date"),
+                "days_since_52w_low": m.get("days_since_52w_low"),
                 "last_activity": real_signals[0]["date"] if real_signals else datetime.now().strftime("%Y-%m-%d"),
                 "current_price": round(price, 2) if price else 0,
                 "low_52w": round(low, 2) if low else 0,
@@ -1012,25 +1131,11 @@ def fetch_asx_stocks(full: bool = False, force_yf: bool = False):
                 "net_cash_pct_mcap": m.get("net_cash_pct_mcap", 0),
                 "pe": m.get("pe", 0),
                 "pb": m.get("pb", 0),
+                "rsi": m.get("rsi"),
                 "metrics": {
-                    "pe": m.get("pe", 0),
-                    "forward_pe": m.get("forward_pe", 0),
-                    "pb": m.get("pb", 0),
+                    **(m if isinstance(m, dict) else {}),
                     "p_fcf": p_fcf,
-                    "pcf": m.get("pcf", 0),
-                    "ev_ebitda": m.get("ev_ebitda", 0),
-                    "debt_to_equity": m.get("debt_to_equity", 0),
-                    "cash_on_hand_m": m.get("cash_on_hand_m", 0),
-                    "net_cash_m": m.get("net_cash_m", 0),
-                    "net_cash_pct_mcap": m.get("net_cash_pct_mcap", 0),
                     "currency": m.get("currency") or infer_currency(ticker=f"{ticker}.AX"),
-                    "roe": m.get("roe", 0),
-                    "roic": m.get("roic", 0),
-                    "fcf_yield": m.get("fcf_yield", 0),
-                    "div_yield": m.get("div_yield", 0),
-                    "market_cap": m.get("market_cap", 0),
-                    "ma_200w": m.get("ma_200w", 0),
-                    "pct_from_200w_ma": m.get("pct_from_200w_ma", 0),
                 },
                 # top-level shortcuts for table columns (full list view)
                 "p_fcf": p_fcf,
@@ -1149,26 +1254,33 @@ def _fetch_single_asx(base_ticker: str, use_pdf: bool = False):
     try:
         yt = yf.Ticker(yf_symbol)
         info = yt.info or {}
-        price = _safe_float(info.get("currentPrice")) or _safe_float(info.get("regularMarketPrice"))
-        low = _safe_float(info.get("fiftyTwoWeekLow"))
-        high = _safe_float(info.get("fiftyTwoWeekHigh"))
-        pct = 0.0
-        if price and low > 0:
-            pct = _safe_round(((price - low) / low) * 100, 1)
+        price = _quote_price(info)
+        low, high = _reconcile_52w_range(
+            price, info.get("fiftyTwoWeekLow"), info.get("fiftyTwoWeekHigh")
+        )
+        pct = _pct_from_52w_low(price, low)
 
-        p_fcf = 0
-        try:
-            fcf = _safe_float(info.get("freeCashflow"))
-            shares = _safe_float(info.get("sharesOutstanding")) or _safe_float(info.get("impliedSharesOutstanding"))
-            if price and fcf and shares > 0:
-                fps = fcf / shares
-                if fps > 0:
-                    p_fcf = _safe_round(price / fps, 1)
-        except Exception:
-            pass
+        p_fcf = _calc_p_fcf(info, price, ticker=yf_symbol)
 
         ma_200w, pct_from_200w_ma = _calc_ma200w_gap(yt, price)
-        metrics = _metrics_from_yf_info(info, price, ma_200w, pct_from_200w_ma, p_fcf)
+        low52 = _calc_last_52w_low(yt)
+        metrics = _metrics_from_yf_info(info, price, ma_200w, pct_from_200w_ma, p_fcf, ticker=yf_symbol)
+        metrics["last_52w_low_date"] = low52.get("last_52w_low_date")
+        metrics["days_since_52w_low"] = low52.get("days_since_52w_low")
+        p_fcf = metrics.get("p_fcf") or p_fcf
+        from data.yf_helpers import calc_own_history_cheapness, calc_rsi_metrics
+        metrics.update(
+            calc_own_history_cheapness(
+                yt,
+                price=price,
+                pb=metrics.get("pb") or 0,
+                p_fcf=p_fcf or 0,
+                fcf_yield=metrics.get("fcf_yield") or 0,
+            )
+        )
+        rsi_pack = calc_rsi_metrics(yt, with_series=True)
+        metrics["rsi"] = rsi_pack.get("rsi")
+        metrics["rsi_period"] = rsi_pack.get("rsi_period")
         market_cap = metrics.get("market_cap", 0)
         pe = metrics.get("pe", 0)
         pb = metrics.get("pb", 0)
@@ -1196,6 +1308,8 @@ def _fetch_single_asx(base_ticker: str, use_pdf: bool = False):
             "buyback_date": None,
             "pct_from_52w_low": pct,
             "pct_from_200w_ma": pct_from_200w_ma,
+            "last_52w_low_date": metrics.get("last_52w_low_date"),
+            "days_since_52w_low": metrics.get("days_since_52w_low"),
             "last_activity": real_signals[0]["date"] if real_signals else datetime.now().strftime("%Y-%m-%d"),
             "current_price": _safe_round(price, 2),
             "low_52w": _safe_round(low, 2),
@@ -1206,15 +1320,22 @@ def _fetch_single_asx(base_ticker: str, use_pdf: bool = False):
             "pe": pe,
             "pb": pb,
             "p_fcf": p_fcf,
+            "rsi": metrics.get("rsi"),
             "metrics": metrics,
             "signals": formatted,
             "summary": summary,
             "_market": "asx",
             "_live": True,
             "price_trend": price_trend,
+            "rsi_trend": rsi_pack.get("rsi_trend") or [],
             "earnings_history": earnings_history,
         }
-        return stock
+        try:
+            from data.earnings_multiples import attach_earnings_multiples
+            attach_earnings_multiples(stock)
+        except Exception:
+            pass
+        return _sanitize_stock_figures(stock)
     except Exception as e:
         logger.warning(f"_fetch_single_asx failed for {t}: {e}")
         return None

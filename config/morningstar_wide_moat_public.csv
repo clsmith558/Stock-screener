@@ -1,0 +1,103 @@
+# 98 selected names from Morningstar's US-listed wide-moat universe — August 2026.
+# Public-source compilation (widely circulated; e.g. X posts), not Morningstar's
+# complete live constituent file. Morningstar reported 169 US wide-moat stocks
+# after its March 2026 review. Moat ratings can change.
+ticker,name
+A,Agilent Technologies
+AAPL,Apple
+ABBV,AbbVie
+ABBNY,ABB Ltd ADR
+ABEV,Ambev ADR
+ABNB,Airbnb
+ADI,Analog Devices
+ADP,Automatic Data Processing
+ADSK,Autodesk
+ALLE,Allegion
+AMAT,Applied Materials
+AME,AMETEK
+AMGN,Amgen
+AMZN,Amazon.com
+ANET,Arista Networks
+AOS,A.O. Smith
+APD,Air Products and Chemicals
+ASML,ASML Holding ADR
+AVGO,Broadcom
+AXP,American Express
+BA,Boeing
+BABA,Alibaba Group Holding ADR
+BAC,Bank of America
+BF-B,Brown-Forman
+BLK,BlackRock
+BMY,Bristol-Myers Squibb
+BRK-B,Berkshire Hathaway
+BUD,Anheuser-Busch InBev ADR
+BX,Blackstone
+CAT,Caterpillar
+CLX,Clorox
+CME,CME Group
+CMG,Chipotle Mexican Grill
+COST,Costco Wholesale
+CPRT,Copart
+CSGP,CoStar Group
+CTVA,Corteva
+DDOG,Datadog
+DE,Deere
+DHR,Danaher
+EADSY,Airbus SE ADR
+EL,Estee Lauder
+FICO,Fair Isaac
+FTNT,Fortinet
+GE,GE Aerospace
+GEHC,GE HealthCare Technologies
+GILD,Gilead Sciences
+GOOGL,Alphabet
+GS,Goldman Sachs
+GWRE,Guidewire Software
+HD,Home Depot
+HII,Huntington Ingalls Industries
+IBKR,Interactive Brokers
+ICE,Intercontinental Exchange
+INTU,Intuit
+ISRG,Intuitive Surgical
+JKHY,Jack Henry & Associates
+JNJ,Johnson & Johnson
+JPM,JPMorgan Chase
+KO,Coca-Cola
+KVUE,Kenvue
+LLY,Eli Lilly
+LMT,Lockheed Martin
+LNG,Cheniere Energy
+LPLA,LPL Financial Holdings
+LRCX,Lam Research
+MA,Mastercard
+MAS,Masco
+MCO,Moody's
+MDLZ,Mondelez International
+MELI,MercadoLibre
+META,Meta Platforms
+MO,Altria Group
+MPWR,Monolithic Power Systems
+MRK,Merck & Co
+MSFT,Microsoft
+NOC,Northrop Grumman
+NVDA,NVIDIA
+NVO,Novo Nordisk ADR
+ORCL,Oracle
+OTIS,Otis Worldwide
+PANW,Palo Alto Networks
+PEP,PepsiCo
+PG,Procter & Gamble
+PM,Philip Morris International
+RHHBY,Roche Holding ADR
+RMD,ResMed
+RTX,RTX
+SAP,SAP SE ADR
+SCHW,Charles Schwab
+SONY,Sony Group ADR
+SPGI,S&P Global
+TMO,Thermo Fisher Scientific
+UPS,United Parcel Service
+V,Visa
+VEEV,Veeva Systems
+VRSN,VeriSign
+ZTS,Zoetis

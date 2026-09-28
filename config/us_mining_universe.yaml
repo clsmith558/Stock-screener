@@ -1,0 +1,179 @@
+# Phase-1 pilot universe: US-listed mining (coal, copper, precious/base metals).
+# Used for SEC Item 1.03 (bankruptcy/receivership) collection — not a full GICS universe.
+#
+# ticker: Yahoo / EDGAR trading symbol when resolvable
+# cik: optional zero-padded or int CIK when ticker is stale (e.g. post-merger)
+# commodities: free tags for later cost-curve slicing
+# manual_reorg: curated successor notes when Item 1.03 is on a prior entity only
+
+description: >
+  US mining pilot for (1) bankruptcy-cleaned survivor via 8-K Item 1.03,
+  (2) reserve life via 10-K S-K 1300 narrative / Exhibit 96 flags, and
+  (3) reported unit costs ranked within pilot peer cohorts (not WoodMac).
+  Prefer CIK when the post-reorg ticker no longer resolves in EDGAR.
+
+companies:
+  # --- Coal (dense 2010s reorg cohort) ---
+  - ticker: BTU
+    name: Peabody Energy
+    commodities: [coal]
+  - ticker: ARCH
+    cik: 1037676
+    name: Arch Resources (hist. Arch Coal)
+    commodities: [coal]
+    notes: CIK retained through reorg; ticker may not resolve post-CNR combination
+  - ticker: CNR
+    name: Core Natural Resources
+    commodities: [coal]
+    notes: CONSOL/Arch combination successor path — verify manually
+  - ticker: AMR
+    name: Alpha Metallurgical Resources
+    commodities: [coal, met]
+    manual_reorg:
+      source: curated
+      relationship: successor_entity
+      note: Contura/Alpha Natural Resources reorg lineage; may lack Item 1.03 on current CIK
+  - ticker: HCC
+    name: Warrior Met Coal
+    commodities: [coal, met]
+    manual_reorg:
+      source: curated
+      relationship: successor_assets
+      note: Formed around Walter Energy met-coal assets after Chapter 11
+  - ticker: METC
+    name: Ramaco Resources
+    commodities: [coal, met]
+  - ticker: SXC
+    name: SunCoke Energy
+    commodities: [coal, coke]
+  - ticker: ARLP
+    name: Alliance Resource Partners
+    commodities: [coal]
+  - ticker: NRP
+    name: Natural Resource Partners
+    commodities: [coal]
+  - ticker: HNRG
+    name: Hallador Energy
+    commodities: [coal]
+  - ticker: CEIX
+    cik: 1710366
+    name: CONSOL Energy / Core Natural lineage
+    commodities: [coal]
+    notes: CEIX ticker may resolve as CNR after combination
+
+  # --- Copper / base metals ---
+  - ticker: FCX
+    name: Freeport-McMoRan
+    commodities: [copper]
+  - ticker: SCCO
+    name: Southern Copper
+    commodities: [copper]
+  - ticker: HBM
+    name: Hudbay Minerals
+    commodities: [copper]
+  - ticker: TECK
+    name: Teck Resources
+    commodities: [copper, coal, zinc]
+  - ticker: AA
+    name: Alcoa
+    commodities: [aluminum]
+  - ticker: CLF
+    name: Cleveland-Cliffs
+    commodities: [iron, steel]
+  - ticker: VALE
+    name: Vale
+    commodities: [iron, copper]
+    notes: >
+      Foreign private issuer (6-K / 20-F). Iron C1 cash cost FOB ex-third-party
+      purchases — not all-in CFR.
+  - ticker: NUE
+    name: Nucor
+    commodities: [steel]
+  - ticker: STLD
+    name: Steel Dynamics
+    commodities: [steel]
+  - ticker: RS
+    name: Reliance
+    commodities: [metals]
+  - ticker: CENX
+    name: Century Aluminum
+    commodities: [aluminum]
+  - ticker: CSTM
+    name: Constellium
+    commodities: [aluminum]
+
+  # --- Precious / diversified mining ---
+  - ticker: NEM
+    name: Newmont
+    commodities: [gold]
+  - ticker: GOLD
+    name: Barrick Gold
+    commodities: [gold]
+  - ticker: AEM
+    name: Agnico Eagle
+    commodities: [gold]
+  - ticker: KGC
+    name: Kinross Gold
+    commodities: [gold]
+  - ticker: AU
+    name: AngloGold Ashanti
+    commodities: [gold]
+  - ticker: GFI
+    name: Gold Fields
+    commodities: [gold]
+    notes: NYSE ADR / JSE; 6-K and 20-F for AISC
+  - ticker: HL
+    name: Hecla Mining
+    commodities: [silver, gold]
+  - ticker: CDE
+    name: Coeur Mining
+    commodities: [silver, gold]
+  - ticker: PAAS
+    name: Pan American Silver
+    commodities: [silver]
+  - ticker: AG
+    name: First Majestic Silver
+    commodities: [silver]
+  - ticker: RGLD
+    name: Royal Gold
+    commodities: [royalty]
+  - ticker: MP
+    name: MP Materials
+    commodities: [rare_earth]
+  - ticker: UUUU
+    name: Energy Fuels
+    commodities: [uranium]
+  - ticker: CCJ
+    name: Cameco
+    commodities: [uranium]
+  - ticker: LEU
+    name: Centrus Energy
+    commodities: [uranium]
+  - ticker: UEC
+    name: Uranium Energy
+    commodities: [uranium]
+  - ticker: MUX
+    name: McEwen Mining
+    commodities: [gold, copper]
+  - ticker: IPI
+    name: Intrepid Potash
+    commodities: [potash]
+  - ticker: MOS
+    name: Mosaic
+    commodities: [potash, phosphate]
+  - ticker: CF
+    name: CF Industries
+    commodities: [fertilizer]
+  - ticker: CMP
+    name: Compass Minerals
+    commodities: [minerals]
+  - ticker: SMG
+    name: Scotts Miracle-Gro
+    commodities: [materials]
+    notes: peripheral — included only if materials list overlap needed; low priority
+
+# Lookback for EDGAR 8-K scans (years). Item 1.03 events older than this are still kept if found.
+scan_years: 20
+
+# Rate limit between company EDGAR pulls
+fetch_sleep_seconds: 0.35

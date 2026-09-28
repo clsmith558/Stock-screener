@@ -525,6 +525,11 @@ def attach_edgar_to_stock(stock: dict, edgar: dict | None = None, ticker: str | 
     stock["share_count_5y_change_pct"] = metrics["share_count_5y_change_pct"]
     stock["earnings_yoy_pct"] = metrics["earnings_yoy_pct"]
     stock["earnings_5y_growth_pct"] = metrics["earnings_5y_growth_pct"]
+    try:
+        from data.earnings_multiples import attach_earnings_multiples
+        attach_earnings_multiples(stock)
+    except Exception as e:
+        logger.debug("earnings multiples attach skipped for %s: %s", sym, e)
     return stock
 
 

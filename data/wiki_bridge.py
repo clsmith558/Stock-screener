@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from scoring.quant_score import compute_quant_score
+from scoring.quant_score import build_peer_value_lists, compute_quant_score
 
 logger = logging.getLogger(__name__)
 
@@ -21,14 +21,57 @@ _REGISTRY_PATH = Path(__file__).resolve().parent / "company_registry.json"
 _TICKER_INDEX: dict[str, dict] | None = None
 _REGISTRY_META: dict | None = None
 
+# Yahoo-style exchange suffixes. Do NOT strip these for vault lookup — RMS.AX
+# (Ramelius, ASX) is not RMS.PA (Hermès, Paris).
+_EXCHANGE_SUFFIX_RE = re.compile(
+    r"\.(AX|HK|TO|L|PA|IR|T|DE|SW|SI|KS|KQ|SA|MX|NS|BO|NZ|JO|F|VI)$",
+    re.I,
+)
+
+
+def _canonical_ticker(t: str | int | None) -> str:
+    """Uppercase ticker; keep exchange suffix (RMS.AX stays RMS.AX)."""
+    if t is None or t == "":
+        return ""
+    return str(t).upper().strip()
+
 
 def _normalize_ticker(t: str) -> str:
-    if not t:
-        return ""
-    s = str(t).upper().strip()
-    s = re.sub(r"\.(AX|HK|TO|L|PA|IR)$", "", s)
-    s = s.replace(".AX", "").replace("-W", "")
+    """
+    Legacy helper: base symbol without exchange suffix / warrant class.
+
+    Prefer _canonical_ticker + _index_keys_for_ticker for registry matching.
+    Stripping suffixes is unsafe for cross-listing collisions (RMS.AX vs RMS.PA).
+    """
+    s = _canonical_ticker(t)
+    s = _EXCHANGE_SUFFIX_RE.sub("", s)
+    if s.endswith("-W"):
+        s = s[:-2]
     return s
+
+
+def _has_exchange_suffix(t: str) -> bool:
+    return bool(_EXCHANGE_SUFFIX_RE.search(_canonical_ticker(t)))
+
+
+def _index_keys_for_ticker(tick: str | int | None) -> list[str]:
+    """
+    Keys under which a registry ticker may be found.
+
+    - Always index the full symbol (RMS.PA, AMD, CSU.TO).
+    - Warrant classes (BABA-W) also index the root (BABA).
+    - Never collapse exchange-suffixed symbols to a bare base — that maps
+      RMS.AX → Hermès and AMD.AX → US AMD incorrectly.
+    """
+    full = _canonical_ticker(tick)
+    if not full:
+        return []
+    keys = [full]
+    if full.endswith("-W"):
+        root = full[:-2]
+        if root:
+            keys.append(root)
+    return keys
 
 
 def _normalize_name(name: str) -> str:
@@ -57,10 +100,9 @@ def load_registry(force: bool = False) -> tuple[dict, dict]:
         for cid, entry in companies.items():
             entry = dict(entry)
             entry["registry_id"] = cid
-            index[cid.upper()] = entry
+            index[str(cid).upper()] = entry
             for tick in entry.get("tickers") or []:
-                key = _normalize_ticker(tick)
-                if key:
+                for key in _index_keys_for_ticker(tick):
                     index[key] = entry
             for name in entry.get("names") or []:
                 key = _normalize_name(name)
@@ -113,14 +155,31 @@ def wiki_links_for_entry(entry: dict | None) -> dict:
 
 
 def lookup_company(ticker: str, name: str = "") -> dict | None:
+    """
+    Match screener ticker/name to a vault registry entry.
+
+    Ticker rules (exchange-aware):
+      1. Exact full symbol (RMS.PA, AMD, NEM.AX)
+      2. Warrant root (BABA-W → BABA) when registered that way
+      3. Never strip exchange suffixes for a bare-base fallback
+         (RMS.AX must not match Hermès RMS.PA; AMD.AX must not match US AMD)
+      4. Exact normalized company name
+
+    Dual listings of the *same* company need both tickers listed in the
+    registry (e.g. NEM and NEM.AX).
+    """
     index, _ = load_registry()
-    for candidate in (
-        _normalize_ticker(ticker),
-        ticker.upper().strip() if ticker else "",
-        _normalize_name(name),
-    ):
-        if candidate and candidate in index:
-            return index[candidate]
+    full = _canonical_ticker(ticker)
+    if full and full in index:
+        return index[full]
+    if full.endswith("-W"):
+        root = full[:-2]
+        if root and root in index:
+            return index[root]
+    # Intentionally no bare-base fallback when ticker has .AX/.PA/etc.
+    nkey = _normalize_name(name)
+    if nkey and nkey in index:
+        return index[nkey]
     return None
 
 
@@ -167,27 +226,44 @@ def compute_qual_score(entry: dict | None) -> dict:
     return qual_payload
 
 
-def enrich_stock_opportunity(stock: dict, peers: list[dict] | None = None) -> dict:
-    """Add quant, qual, composite fields to a stock row."""
+def enrich_stock_opportunity(
+    stock: dict,
+    peers: list[dict] | None = None,
+    peer_vals: dict | None = None,
+) -> dict:
+    """
+    Add quant, vault qual metadata, and dashboard Score fields.
+
+    Score (composite_score) is **quantitative only** — equal to quant_score.
+    Vault coverage (qual_score / tier) is still attached for links and display
+    but no longer scales the Score.
+    """
     row = dict(stock)
-    quant = compute_quant_score(row, peers=peers or [])
+    quant = compute_quant_score(row, peers=peers or [], peer_vals=peer_vals)
     row.update(quant)
 
     entry = lookup_company(row.get("ticker", ""), row.get("name", ""))
     qual = compute_qual_score(entry)
     row.update(qual)
 
-    q = row.get("quant_score") or 0
-    m = row.get("qual_score") or 0
-    row["composite_score"] = round(q * (m / 100.0), 1)
+    # Score column = pure quant (0–100). Do not multiply by vault qual.
+    q = row.get("quant_score")
+    row["composite_score"] = round(float(q), 1) if q is not None else None
+    try:
+        from data.vault_memo import attach_memo_status
+
+        attach_memo_status(row)
+    except Exception:
+        pass
     return row
 
 
 def enrich_stocks_with_opportunities(stocks: list[dict]) -> list[dict]:
     load_registry()
+    peer_vals = build_peer_value_lists(stocks)
     enriched = []
     for s in stocks:
-        enriched.append(enrich_stock_opportunity(s, peers=stocks))
+        enriched.append(enrich_stock_opportunity(s, peers=stocks, peer_vals=peer_vals))
     enriched.sort(key=lambda x: x.get("composite_score") or 0, reverse=True)
     for i, row in enumerate(enriched, 1):
         row["opportunity_rank"] = i

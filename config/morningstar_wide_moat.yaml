@@ -1,0 +1,91 @@
+# Morningstar wide-moat list — public-source proxy for the screener Lists dropdown.
+#
+# This is NOT Morningstar's complete live Wide Economic Moat universe.
+# Morningstar reported 169 US-listed wide-moat stocks after its March 2026 review;
+# the full screen is behind Morningstar Investor.
+#
+# The refresh script unions:
+#   1) Best Companies to Own (official public CSVs) — Wide moat PLUS
+#      Standard/Exemplary capital allocation AND Low/Medium fair-value uncertainty
+#   2) A public compilation of 98 selected US-listed names (Aug 2026)
+#   3) VanEck MOAT ETF holdings when scrapeable (Wide Moat Focus Index —
+#      the cheapest ~50 wide-moat names, not the full universe)
+
+article_url: https://www.morningstar.com/stocks/best-companies-own-2026-edition
+article_url_generic: https://www.morningstar.com/stocks/best-companies-own
+
+# Fallback CSV URLs if the article HTML cannot be parsed (2026 edition, data as of 2026-07-10).
+csv_url_fallback_2026:
+  cyclical: https://cosmos-cdn.morningstar.com/playfair/01KYQPMW2FDP0HNTSFJEX7GQ2S/data.csv
+  defensive: https://cosmos-cdn.morningstar.com/playfair/01KYQPAWGH9G6X8BTB122KMRBA/data.csv
+  financial: https://cosmos-cdn.morningstar.com/playfair/01KYQP4B3E5Y1RJS4Q89R0JEQX/data.csv
+  healthcare: https://cosmos-cdn.morningstar.com/playfair/01KYQNPXJB4KWBJGHN43X6X6QJ/data.csv
+  industrials: https://cosmos-cdn.morningstar.com/playfair/01KYQNBGDVY4Y219R88E48FQ1Z/data.csv
+  technology: https://cosmos-cdn.morningstar.com/playfair/01KYQPJ80Q0DVVFD3QM09R27TA/data.csv
+  other: https://cosmos-cdn.morningstar.com/playfair/01KYQPEGBG03P0836W2NQYWHTJ/data.csv
+
+public_compilation_csv: config/morningstar_wide_moat_public.csv
+
+# Last-known VanEck MOAT (Wide Moat Focus Index) holdings, ~Aug 2026.
+# Used only if live holdings scrape fails.
+moat_fallback_holdings:
+  - A
+  - ABNB
+  - AMAT
+  - AMZN
+  - APH
+  - AVGO
+  - BF-B
+  - BMY
+  - BR
+  - BX
+  - CLX
+  - CMG
+  - CPRT
+  - CSGP
+  - DDOG
+  - DHR
+  - DIS
+  - DPZ
+  - EL
+  - ENTG
+  - FICO
+  - FTNT
+  - GEHC
+  - GWRE
+  - HII
+  - HSY
+  - JKHY
+  - KVUE
+  - LPLA
+  - MAS
+  - MDLZ
+  - MELI
+  - META
+  - MKC
+  - MKTX
+  - MSFT
+  - MSI
+  - NKE
+  - NOC
+  - NVDA
+  - NXPI
+  - OTIS
+  - PANW
+  - PEP
+  - SCHW
+  - STZ
+  - TMO
+  - TRU
+  - TSCO
+  - TYL
+  - USB
+  - VEEV
+  - WST
+  - ZBH
+  - ZTS
+
+moat_holdings_urls:
+  - https://stockanalysis.com/etf/moat/holdings/
+  - https://companiesmarketcap.com/vaneck-morningstar-wide-moat-etf/holdings/
+  - https://www.vaneck.com/us/en/etf/equity/moat/holdings/download/xlsx/

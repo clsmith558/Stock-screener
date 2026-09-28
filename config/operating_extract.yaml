@@ -1,0 +1,124 @@
+# Phase 2 — quarterly operating extracts from filings.
+# Seed list only. Heuristic regex; always verify snippet vs the source.
+#
+# Collector: scripts/collect_operating_extract.py
+# Store: asx_announcements_cache.db → operating_extract
+
+version: 1
+status: phase2
+
+# Default lookback when pulling SEC / ASX docs
+max_10q: 6
+max_10k: 2
+max_8k: 8
+
+seed:
+  - ticker: OXY
+    name: Occidental Petroleum
+    market: us
+    fields: [production, realized_price, hedge_pct, capex]
+    production: {unit: mboe/d, commodity: oil}
+    realized: {unit: USD/bbl, commodity: oil}
+    hedge: {unit: pct}
+    capex: {unit: USD}
+
+  - ticker: EQT
+    name: EQT
+    market: us
+    fields: [production, realized_price, hedge_pct, capex]
+    production: {unit: Bcfe/d, commodity: gas}
+    realized: {unit: USD/Mcfe, commodity: gas}
+    hedge: {unit: pct}
+    capex: {unit: USD}
+
+  - ticker: HCC
+    name: Warrior Met Coal
+    market: us
+    fields: [production, realized_price, capex]
+    production: {unit: Mt, commodity: coal}
+    realized: {unit: USD/t, commodity: coal}
+    capex: {unit: USD}
+
+  - ticker: NHC.AX
+    name: New Hope
+    market: asx
+    fields: [production, realized_price]
+    production: {unit: Mt, commodity: coal}
+    realized: {unit: USD/t, commodity: coal}
+
+  - ticker: WDS.AX
+    name: Woodside Energy
+    market: asx
+    sec_ticker: WDS
+    fields: [production, realized_price, hedge_pct, capex]
+    production: {unit: MMboe, commodity: oil}
+    realized: {unit: USD/boe, commodity: oil}
+    hedge: {unit: pct}
+    capex: {unit: USD}
+
+  - ticker: CEG
+    name: Constellation Energy
+    market: us
+    fields: [production, realized_price, capex]
+    production: {unit: TWh, commodity: power}
+    realized: {unit: USD/MWh, commodity: power}
+    capex: {unit: USD}
+
+  # Commodities-tab producers (volume chart)
+  - ticker: WHC.AX
+    name: Whitehaven Coal
+    market: asx
+    fields: [production, realized_price]
+    production: {unit: Mt, commodity: coal}
+    realized: {unit: USD/t, commodity: coal}
+  - ticker: YAL.AX
+    name: Yancoal
+    market: asx
+    fields: [production, realized_price]
+    production: {unit: Mt, commodity: coal}
+    realized: {unit: USD/t, commodity: coal}
+  - ticker: BTU
+    name: Peabody Energy
+    market: us
+    fields: [production, realized_price, capex]
+    production: {unit: Mt, commodity: coal}
+    realized: {unit: USD/t, commodity: coal}
+    capex: {unit: USD}
+  - ticker: AMR
+    name: Alpha Metallurgical
+    market: us
+    fields: [production, realized_price, capex]
+    production: {unit: Mt, commodity: coal}
+    realized: {unit: USD/t, commodity: coal}
+    capex: {unit: USD}
+  - ticker: ARLP
+    name: Alliance Resource Partners
+    market: us
+    fields: [production, realized_price, capex]
+    production: {unit: Mt, commodity: coal}
+    realized: {unit: USD/t, commodity: coal}
+    capex: {unit: USD}
+  - ticker: NEM
+    name: Newmont
+    market: us
+    fields: [production, realized_price]
+    production: {unit: koz, commodity: gold}
+    realized: {unit: USD/oz, commodity: gold}
+  - ticker: FCX
+    name: Freeport-McMoRan
+    market: us
+    fields: [production, realized_price]
+    production: {unit: Mlb, commodity: copper}
+    realized: {unit: USD/lb, commodity: copper}
+  - ticker: SCCO
+    name: Southern Copper
+    market: us
+    fields: [production, realized_price]
+    production: {unit: Mlb, commodity: copper}
+    realized: {unit: USD/lb, commodity: copper}
+  - ticker: AA
+    name: Alcoa
+    market: us
+    fields: [production, realized_price]
+    production: {unit: kt, commodity: aluminum}
+    realized: {unit: USD/t, commodity: aluminum}
