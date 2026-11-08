@@ -701,13 +701,20 @@ def api_watchlist_alerts_prefs():
 
 @app.route("/api/stock/<path:ticker>/announcements")
 def api_stock_announcements(ticker):
-    """Latest company announcements with source URLs for the detail modal."""
+    """Latest company announcements with source URLs and NLP catalyst classification for the detail modal."""
     try:
         from data.company_announcements import get_announcements
+        from scoring.nlp_filings import classify_announcement_catalyst
 
         market = request.args.get("market", "")
         limit = _int_arg("limit", 15)
         payload = get_announcements(ticker, market=market, limit=limit)
+        for a in payload.get("announcements") or []:
+            cat = classify_announcement_catalyst(a.get("headline") or "", a.get("type") or "")
+            a["catalyst_label"] = cat["catalyst_label"]
+            a["tone"] = cat["tone"]
+            a["tone_score"] = cat["tone_score"]
+            a["badge_cls"] = cat["badge_cls"]
         return jsonify(payload)
     except Exception as e:
         logger.exception("api_stock_announcements failed")
@@ -748,6 +755,357 @@ def api_opportunities():
         "count": len(opportunities),
         "meta": meta,
     })
+
+
+@app.route("/api/eda/summary")
+def api_eda_summary():
+    """
+    Cross-sectional Statistical / EDA summary for a market or business list:
+    - Sector & global robust distributions (median, MAD, IQR, Bowley skewness)
+    - Sector-adjusted Robust Z-Scores, percentile ranks, and Multi-Factor
+      Value/Quality Composite Scores (`vq_score`, `val_z`, `qual_z`, `posture_z`).
+    """
+    market = request.args.get("market", "business")
+    list_id = request.args.get("list", "")
+    full = _bool_arg("full", default=True)
+    min_peers = max(2, _int_arg("min_peers", 5))
+    val_w = _float_arg("val_w", 0.45)
+    qual_w = _float_arg("qual_w", 0.40)
+    post_w = _float_arg("post_w", 0.15)
+    include_profiles = _bool_arg("profiles", default=False)
+    try:
+        from scoring.eda_stats import compute_cross_sectional_eda
+
+        stocks = get_stocks_for_market(market, full=full, list_id=list_id, fast=True)
+        eda = compute_cross_sectional_eda(
+            stocks,
+            min_sector_peers=min_peers,
+            value_weight=val_w,
+            quality_weight=qual_w,
+            posture_weight=post_w,
+        )
+        if not include_profiles:
+            eda.pop("profiles", None)
+        eda["meta"] = _get_market_meta(market, list_id=list_id)
+        return jsonify(eda)
+    except Exception as e:
+        logger.exception("api_eda_summary failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/ml/unsupervised")
+def api_ml_unsupervised():
+    """
+    Unsupervised Learning (`scikit-learn`) endpoint:
+    1. K-Means Fundamental Archetype Clustering (`KMeans` + `RobustScaler` + `SimpleImputer`/`KNNImputer`)
+    2. k-Nearest Neighbors (`NearestNeighbors`) Mathematical Comps & Peer Valuation Discount
+    3. Anomaly Detection (`IsolationForest` + Mahalanobis Distance + Huber Regression Residual)
+       for surfacing Mispriced Quality Outliers.
+
+    By default (`scope=global`), serves the precomputed **full-dataset** model (~17,000+ global
+    stocks across all lists/markets) that refreshes in the background once per week.
+    """
+    scope = (request.args.get("scope") or "global").strip().lower()
+    market = request.args.get("market", "business")
+    list_id = request.args.get("list", "")
+    full = _bool_arg("full", default=True)
+    n_neighbors = max(1, min(15, _int_arg("k", 5)))
+    n_clusters = max(2, min(12, _int_arg("clusters", 6)))
+    contamination = max(0.02, min(0.25, _float_arg("contamination", 0.08)))
+    ticker = (request.args.get("ticker") or "").strip().upper()
+    include_profiles = _bool_arg("profiles", default=True)
+    try:
+        from scoring.unsupervised_ml import (
+            get_ml_job_status,
+            load_persisted_global_ml,
+            run_unsupervised_analysis,
+            start_weekly_ml_scheduler,
+            trigger_global_ml_rebuild_async,
+        )
+
+        # Ensure the weekly background daemon scheduler is active
+        start_weekly_ml_scheduler()
+
+        if scope != "list":
+            persisted = load_persisted_global_ml()
+            if not persisted:
+                trigger_global_ml_rebuild_async()
+                return jsonify({
+                    "scope": "global",
+                    "building": True,
+                    "job": get_ml_job_status(),
+                    "total_stocks": 0,
+                    "modeled_stocks": 0,
+                    "clusters": [],
+                    "top_mispriced_outliers": [],
+                    "profiles": {},
+                    "note": "Initial full-dataset ML model is building in the background (~3s)...",
+                })
+            if not persisted.get("is_fresh"):
+                # Serve existing snapshot immediately and refresh in background
+                trigger_global_ml_rebuild_async()
+
+            if ticker:
+                profs = persisted.get("profiles") or {}
+                prof = profs.get(ticker) or profs.get(ticker + ".AX") or profs.get(ticker.replace(".AX", ""))
+                return jsonify({
+                    "scope": "global",
+                    "computed_at": persisted.get("computed_at"),
+                    "next_scheduled_refresh": persisted.get("next_scheduled_refresh"),
+                    "ticker": ticker,
+                    "profile": prof,
+                    "clusters": persisted.get("clusters", []),
+                    "modeled_stocks": persisted.get("modeled_stocks", 0),
+                })
+
+            out = dict(persisted)
+            out["job"] = get_ml_job_status()
+            if not include_profiles:
+                out.pop("profiles", None)
+            elif market and market not in ("all", "global"):
+                # Still return all profiles (or subset if requested) — returning the full
+                # profile dictionary ensures any stock or k-NN peer clicked in the UI resolves!
+                pass
+            return jsonify(out)
+
+        # Optional fallback if caller explicitly passes ?scope=list
+        stocks = get_stocks_for_market(market, full=full, list_id=list_id, fast=True)
+        res = run_unsupervised_analysis(
+            stocks,
+            n_neighbors=n_neighbors,
+            n_clusters=n_clusters,
+            contamination=contamination,
+        )
+        res["scope"] = "list"
+        if ticker:
+            prof = (res.get("profiles") or {}).get(ticker)
+            if not prof and not ticker.endswith(".AX") and market == "asx":
+                prof = (res.get("profiles") or {}).get(ticker + ".AX")
+            return jsonify({
+                "scope": "list",
+                "ticker": ticker,
+                "profile": prof,
+                "clusters": res.get("clusters", []),
+                "modeled_stocks": res.get("modeled_stocks", 0),
+            })
+        if not include_profiles:
+            res.pop("profiles", None)
+        res["meta"] = _get_market_meta(market, list_id=list_id)
+        return jsonify(res)
+    except Exception as e:
+        logger.exception("api_ml_unsupervised failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/ml/unsupervised/status")
+def api_ml_unsupervised_status():
+    """Return status of the weekly global Unsupervised ML background job."""
+    try:
+        from scoring.unsupervised_ml import get_ml_job_status, start_weekly_ml_scheduler
+
+        start_weekly_ml_scheduler()
+        return jsonify(get_ml_job_status())
+    except Exception as e:
+        logger.exception("api_ml_unsupervised_status failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/ml/unsupervised/rebuild", methods=["POST"])
+def api_ml_unsupervised_rebuild():
+    """Force an immediate background rebuild of the global full-dataset Unsupervised ML model."""
+    try:
+        from scoring.unsupervised_ml import (
+            get_ml_job_status,
+            start_weekly_ml_scheduler,
+            trigger_global_ml_rebuild_async,
+        )
+
+        start_weekly_ml_scheduler()
+        started = trigger_global_ml_rebuild_async()
+        return jsonify({
+            "status": "started" if started else "already_running",
+            "message": (
+                "Full-dataset Unsupervised ML rebuild started in background (~3–5s)."
+                if started
+                else "Full-dataset Unsupervised ML rebuild is already running."
+            ),
+            "job": get_ml_job_status(),
+        })
+    except Exception as e:
+        logger.exception("api_ml_unsupervised_rebuild failed")
+        return _json_error(str(e))
+
+
+@app.route("/api/ml/snapshots")
+def api_ml_snapshots():
+    """
+    Return monthly point-in-time snapshot history, historical outlier cohort forward
+    return performance, and k-NN Historical Analog return predictions for present-day stocks.
+    """
+    market = request.args.get("market", "")
+    list_id = request.args.get("list", "")
+    full = _bool_arg("full", default=True)
+    scope = (request.args.get("scope") or "global").strip().lower()
+    try:
+        from scoring.historical_snapshots import (
+            capture_monthly_snapshot,
+            get_snapshots_overview,
+            has_snapshot_for_month,
+            start_monthly_snapshot_scheduler,
+        )
+
+        start_monthly_snapshot_scheduler()
+        # If no snapshot exists yet for this calendar month, capture it now (~0.4s from cached global ML)
+        if not has_snapshot_for_month():
+            capture_monthly_snapshot(force=False)
+
+        predict_stocks = None
+        if scope == "list" and market:
+            predict_stocks = get_stocks_for_market(market, full=full, list_id=list_id, fast=True)
+
+        overview = get_snapshots_overview(predict_for_stocks=predict_stocks)
+        return jsonify(overview)
+    except Exception as e:
+        logger.exception("api_ml_snapshots failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/ml/snapshots/capture", methods=["POST"])
+def api_ml_snapshots_capture():
+    """Force or refresh the current calendar month's point-in-time snapshot and update forward returns."""
+    force = _bool_arg("force", default=True)
+    snapshot_month = (request.args.get("month") or "").strip() or None
+    try:
+        from scoring.historical_snapshots import capture_monthly_snapshot, start_monthly_snapshot_scheduler
+
+        start_monthly_snapshot_scheduler()
+        res = capture_monthly_snapshot(snapshot_month=snapshot_month, force=force)
+        return jsonify(res)
+    except Exception as e:
+        logger.exception("api_ml_snapshots_capture failed")
+        return _json_error(str(e))
+
+
+@app.route("/api/ml/econometrics")
+def api_ml_econometrics():
+    """
+    Time-Series Econometrics & Macro / Commodity Beta endpoint:
+    Computes univariate & rolling 26w betas, Up/Down market convexity, Multi-Factor Macro
+    Attribution (`Driver + DXY + 10Y TIPS + HY OAS`), and Engle-Granger Cointegration +
+    Ornstein-Uhlenbeck half-life & mean-reverting spread Z-score for `ticker`.
+    """
+    ticker = (request.args.get("ticker") or "").strip().upper()
+    market = (request.args.get("market") or "asx").strip().lower()
+    factor_override = (request.args.get("factor") or "").strip() or None
+    if not ticker:
+        return _json_error("ticker parameter required", 400)
+    try:
+        from scoring.macro_econometrics import compute_stock_macro_econometrics
+
+        t_base = ticker.replace(".AX", "")
+        stock = None
+        if market in ("business", "buybacks") or ("." in ticker and not ticker.endswith(".AX")):
+            from data.business_lists import _fetch_single_business
+
+            stock = _fetch_single_business(ticker)
+        elif market == "us" or (not ticker.endswith(".AX") and "." not in ticker):
+            from data.us import _fetch_single_us
+
+            stock = _fetch_single_us(t_base)
+        else:
+            from data.asx import _fetch_single_asx
+
+            stock = _fetch_single_asx(t_base)
+
+        if not stock:
+            return _json_error(f"Could not fetch price trend for {ticker}", 404)
+        if not factor_override:
+            try:
+                from data.supporting_series import attach_driver_detail
+
+                stock = attach_driver_detail(stock)
+            except Exception:
+                pass
+        res = compute_stock_macro_econometrics(stock, primary_factor_override=factor_override)
+        return jsonify(res)
+    except Exception as e:
+        logger.exception("api_ml_econometrics failed")
+        return _json_error(str(e))
+
+
+@app.route("/api/ml/supervised")
+def api_ml_supervised():
+    """
+    Section 5: Supervised Learning & Backtesting (Signal Calibration) endpoint:
+    Trains L2 Logistic Regression + HistGradientBoosting Classifier/Regressor on dated
+    historical corporate signal events, runs 5-fold TimeSeriesSplit walk-forward backtesting,
+    calibrates optimal opportunity_weights.yaml pillar weights, and ranks present-day candidates.
+    """
+    market = request.args.get("market", "")
+    list_id = request.args.get("list", "")
+    full = _bool_arg("full", default=True)
+    scope = (request.args.get("scope") or "list").strip().lower()
+    force = _bool_arg("force", default=False)
+    try:
+        from scoring.supervised_calibration import run_supervised_calibration
+
+        cand_stocks = None
+        if scope == "list" and market:
+            cand_stocks = get_stocks_for_market(market, full=full, list_id=list_id, fast=True)
+        res = run_supervised_calibration(stocks=cand_stocks, force_rebuild=force)
+        return jsonify(res)
+    except Exception as e:
+        logger.exception("api_ml_supervised failed")
+        return _json_error(str(e))
+
+
+@app.route("/api/ml/supervised/apply-weights", methods=["POST"])
+def api_ml_supervised_apply_weights():
+    """Apply the empirically ML-calibrated pillar weights to config/opportunity_weights.yaml."""
+    try:
+        from scoring.quant_score import save_weights
+        from scoring.supervised_calibration import run_supervised_calibration
+
+        cal = run_supervised_calibration(force_rebuild=False)
+        wc = (cal.get("weight_calibration") or {}).get("calibrated_weights")
+        if not wc:
+            return _json_error("Calibrated weights not available", 400)
+        saved = save_weights(wc)
+        return jsonify({
+            "status": "ok",
+            "message": "Applied ML-calibrated opportunity weights to config/opportunity_weights.yaml.",
+            "calibrated_weights": wc,
+            "weights_public": saved,
+        })
+    except Exception as e:
+        logger.exception("api_ml_supervised_apply_weights failed")
+        return _json_error(str(e))
+
+
+@app.route("/api/ml/nlp")
+def api_ml_nlp():
+    """
+    Section 6: Natural Language Processing (NLP) on Filings & Announcements endpoint:
+    Runs Loughran-McDonald Financial Sentiment & Capital-Cycle Lexicon scoring, TF-IDF + NMF
+    Topic Modeling, Tone Momentum, and Bullish Filing Divergence detection across cached
+    ASX announcements, SEC 8-K/10-Q/10-K/Form 4 filings, and mining/energy extracts.
+    """
+    market = request.args.get("market", "")
+    list_id = request.args.get("list", "")
+    full = _bool_arg("full", default=True)
+    scope = (request.args.get("scope") or "global").strip().lower()
+    force = _bool_arg("force", default=False)
+    try:
+        from scoring.nlp_filings import run_corpus_nlp_analysis
+
+        cand_stocks = None
+        if scope == "list" and market:
+            cand_stocks = get_stocks_for_market(market, full=full, list_id=list_id, fast=True)
+        res = run_corpus_nlp_analysis(stocks=cand_stocks, force_rebuild=force)
+        return jsonify(res)
+    except Exception as e:
+        logger.exception("api_ml_nlp failed")
+        return _json_error(str(e))
 
 
 @app.route("/api/kpis")
@@ -809,6 +1167,28 @@ def api_stock_detail(ticker):
             s = attach_driver_detail(s)
         except Exception as e:
             logger.debug("driver detail skipped for %s: %s", raw, e)
+        try:
+            from scoring.macro_econometrics import compute_stock_macro_econometrics
+
+            factor_override = (request.args.get("macro_factor") or "").strip() or None
+            s["macro_econometrics"] = compute_stock_macro_econometrics(
+                s,
+                primary_factor_override=factor_override,
+            )
+        except Exception as e:
+            logger.debug("macro econometrics skipped for %s: %s", raw, e)
+        try:
+            from scoring.supervised_calibration import compute_stock_supervised_profile
+
+            s["supervised_calibration"] = compute_stock_supervised_profile(s)
+        except Exception as e:
+            logger.debug("supervised calibration skipped for %s: %s", raw, e)
+        try:
+            from scoring.nlp_filings import compute_stock_nlp_profile
+
+            s["nlp_profile"] = compute_stock_nlp_profile(s)
+        except Exception as e:
+            logger.debug("nlp profile skipped for %s: %s", raw, e)
         try:
             from data.wiki_bridge import enrich_stock_opportunity
 
@@ -1216,6 +1596,13 @@ def api_rebuild_yf():
 
 
 if __name__ == "__main__":
+    try:
+        from scoring.historical_snapshots import start_monthly_snapshot_scheduler
+        from scoring.unsupervised_ml import start_weekly_ml_scheduler
+        start_weekly_ml_scheduler()
+        start_monthly_snapshot_scheduler()
+    except Exception:
+        pass
     host = os.environ.get("SCREENER_HOST", "127.0.0.1").strip() or "127.0.0.1"
     port = int(os.environ.get("SCREENER_PORT", "5000") or 5000)
     debug = os.environ.get("FLASK_DEBUG", os.environ.get("SCREENER_DEBUG", "")).strip().lower() in _TRUE_VALUES

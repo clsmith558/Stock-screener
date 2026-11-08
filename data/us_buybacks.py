@@ -159,61 +159,65 @@ def normalize_repurchase_shares(
     return chosen
 
 
+_US_BB_DDL = (
+    """
+    CREATE TABLE IF NOT EXISTS us_buyback_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticker TEXT NOT NULL,
+        yf_symbol TEXT NOT NULL,
+        date TEXT NOT NULL,
+        form TEXT NOT NULL,
+        accession TEXT NOT NULL UNIQUE,
+        headline TEXT,
+        url TEXT,
+        source TEXT NOT NULL DEFAULT 'SEC',
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS us_buyback_repurchases (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticker TEXT NOT NULL,
+        yf_symbol TEXT NOT NULL,
+        period_end TEXT NOT NULL,
+        period_label TEXT,
+        shares INTEGER,
+        price REAL,
+        form TEXT NOT NULL,
+        accession TEXT NOT NULL,
+        filing_date TEXT NOT NULL,
+        headline TEXT,
+        url TEXT,
+        source TEXT NOT NULL DEFAULT 'SEC',
+        created_at TEXT NOT NULL,
+        UNIQUE(accession, period_label)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS us_buyback_scan_log (
+        accession TEXT PRIMARY KEY,
+        ticker TEXT NOT NULL,
+        scanned_at TEXT NOT NULL,
+        matched INTEGER NOT NULL DEFAULT 0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS us_buybacks_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_us_bb_ticker ON us_buyback_events(yf_symbol)",
+    "CREATE INDEX IF NOT EXISTS idx_us_bb_date ON us_buyback_events(date)",
+    "CREATE INDEX IF NOT EXISTS idx_us_bb_rep_ticker ON us_buyback_repurchases(yf_symbol)",
+    "CREATE INDEX IF NOT EXISTS idx_us_bb_rep_date ON us_buyback_repurchases(period_end)",
+)
+
+
 def _conn(db_path: str = DEFAULT_UNIVERSE_DB):
-    conn = sqlite3.connect(db_path)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS us_buyback_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ticker TEXT NOT NULL,
-            yf_symbol TEXT NOT NULL,
-            date TEXT NOT NULL,
-            form TEXT NOT NULL,
-            accession TEXT NOT NULL UNIQUE,
-            headline TEXT,
-            url TEXT,
-            source TEXT NOT NULL DEFAULT 'SEC',
-            created_at TEXT NOT NULL
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS us_buyback_repurchases (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ticker TEXT NOT NULL,
-            yf_symbol TEXT NOT NULL,
-            period_end TEXT NOT NULL,
-            period_label TEXT,
-            shares INTEGER,
-            price REAL,
-            form TEXT NOT NULL,
-            accession TEXT NOT NULL,
-            filing_date TEXT NOT NULL,
-            headline TEXT,
-            url TEXT,
-            source TEXT NOT NULL DEFAULT 'SEC',
-            created_at TEXT NOT NULL,
-            UNIQUE(accession, period_label)
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS us_buyback_scan_log (
-            accession TEXT PRIMARY KEY,
-            ticker TEXT NOT NULL,
-            scanned_at TEXT NOT NULL,
-            matched INTEGER NOT NULL DEFAULT 0
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS us_buybacks_meta (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    """)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_us_bb_ticker ON us_buyback_events(yf_symbol)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_us_bb_date ON us_buyback_events(date)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_us_bb_rep_ticker ON us_buyback_repurchases(yf_symbol)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_us_bb_rep_date ON us_buyback_repurchases(period_end)")
-    conn.commit()
-    return conn
+    from data.db import connect_db
+
+    return connect_db(db_path, schema_key="us_buybacks", ddl=_US_BB_DDL)
 
 
 def _meta_get(key: str, db_path: str = DEFAULT_UNIVERSE_DB) -> str:
@@ -936,17 +940,34 @@ def purge_non_completed_repurchases(db_path: str = DEFAULT_UNIVERSE_DB) -> int:
         return 0
 
 
-def load_us_buyback_repurchases(db_path: str = DEFAULT_UNIVERSE_DB) -> list[dict]:
+def load_us_buyback_repurchases(
+    db_path: str = DEFAULT_UNIVERSE_DB,
+    *,
+    yf_symbol: str | None = None,
+) -> list[dict]:
+    sym_filter = _yf_symbol(yf_symbol) if yf_symbol else None
     try:
         conn = _conn(db_path)
-        rows = conn.execute(
-            """
-            SELECT ticker, yf_symbol, period_end, period_label, shares, price,
-                   form, accession, filing_date, headline, url, source
-            FROM us_buyback_repurchases
-            ORDER BY period_end DESC
-            """
-        ).fetchall()
+        if sym_filter:
+            rows = conn.execute(
+                """
+                SELECT ticker, yf_symbol, period_end, period_label, shares, price,
+                       form, accession, filing_date, headline, url, source
+                FROM us_buyback_repurchases
+                WHERE yf_symbol = ?
+                ORDER BY period_end DESC
+                """,
+                (sym_filter,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT ticker, yf_symbol, period_end, period_label, shares, price,
+                       form, accession, filing_date, headline, url, source
+                FROM us_buyback_repurchases
+                ORDER BY period_end DESC
+                """
+            ).fetchall()
         conn.close()
     except Exception as e:
         logger.warning("US buyback repurchases load failed: %s", e)
@@ -1005,19 +1026,35 @@ def load_us_buyback_repurchases(db_path: str = DEFAULT_UNIVERSE_DB) -> list[dict
     return out
 
 
-def load_us_buyback_events(db_path: str = DEFAULT_UNIVERSE_DB) -> list[dict]:
+def load_us_buyback_events(
+    db_path: str = DEFAULT_UNIVERSE_DB,
+    *,
+    yf_symbol: str | None = None,
+) -> list[dict]:
     """Filing-level 8-K events plus parsed 10-Q repurchase rows (for registry + charts)."""
     events = []
+    sym_filter = _yf_symbol(yf_symbol) if yf_symbol else None
 
     try:
         conn = _conn(db_path)
-        filing_rows = conn.execute(
-            """
-            SELECT ticker, yf_symbol, date, form, accession, headline, url, source
-            FROM us_buyback_events
-            ORDER BY date DESC
-            """
-        ).fetchall()
+        if sym_filter:
+            filing_rows = conn.execute(
+                """
+                SELECT ticker, yf_symbol, date, form, accession, headline, url, source
+                FROM us_buyback_events
+                WHERE yf_symbol = ?
+                ORDER BY date DESC
+                """,
+                (sym_filter,),
+            ).fetchall()
+        else:
+            filing_rows = conn.execute(
+                """
+                SELECT ticker, yf_symbol, date, form, accession, headline, url, source
+                FROM us_buyback_events
+                ORDER BY date DESC
+                """
+            ).fetchall()
         conn.close()
     except Exception as e:
         logger.warning("US buyback load failed: %s", e)
@@ -1038,7 +1075,7 @@ def load_us_buyback_events(db_path: str = DEFAULT_UNIVERSE_DB) -> list[dict]:
             "price": None,
         })
 
-    for row in load_us_buyback_repurchases(db_path):
+    for row in load_us_buyback_repurchases(db_path, yf_symbol=sym_filter):
         events.append({
             "yf_symbol": row["yf_symbol"],
             "ticker": row["ticker"],

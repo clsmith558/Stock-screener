@@ -32,16 +32,26 @@ def default_weights() -> dict:
     }
 
 
+_weights_cache: tuple[float | None, dict] | None = None
+
+
 def _load_weights() -> dict:
-    defaults = default_weights()
-    if not _CONFIG_PATH.exists():
-        return defaults
+    global _weights_cache
     try:
-        with open(_CONFIG_PATH, encoding="utf-8") as f:
-            raw = yaml.safe_load(f) or {}
-        defaults.update({k: raw[k] for k in defaults if k in raw})
-    except Exception:
-        pass
+        mtime = _CONFIG_PATH.stat().st_mtime if _CONFIG_PATH.exists() else None
+    except OSError:
+        mtime = None
+    if _weights_cache is not None and _weights_cache[0] == mtime:
+        return dict(_weights_cache[1])
+    defaults = default_weights()
+    if mtime is not None:
+        try:
+            with open(_CONFIG_PATH, encoding="utf-8") as f:
+                raw = yaml.safe_load(f) or {}
+            defaults.update({k: raw[k] for k in defaults if k in raw})
+        except Exception:
+            pass
+    _weights_cache = (mtime, dict(defaults))
     return defaults
 
 

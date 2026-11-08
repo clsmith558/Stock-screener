@@ -348,115 +348,52 @@ _COST_PATTERNS: list[tuple[re.Pattern, str, str, str]] = [
 ]
 
 
-def _ensure_identity() -> None:
-    global _identity_set
-    if _identity_set:
-        return
-    try:
-        from edgar import set_identity
+from data.db import connect_db
+from data.sec_pilot_common import (
+    ensure_sec_identity as _ensure_identity,
+    load_mining_universe as _shared_load_mining_universe,
+    norm_cik as _norm_cik,
+    preferred_commodities as _preferred_commodities,
+    resolve_edgar_company as _resolve_company,
+)
 
-        identity = sec_edgar_identity()
-        if not identity:
-            logger.warning(
-                "SEC_EDGAR_IDENTITY / SCREENER_CONTACT_EMAIL not set — EDGAR may fail"
-            )
-            return
-        set_identity(identity)
-        _identity_set = True
-    except Exception as e:
-        logger.warning("SEC identity setup failed: %s", e)
+_COSTS_DDL = (
+    """
+    CREATE TABLE IF NOT EXISTS mining_costs_summary (
+        ticker TEXT PRIMARY KEY,
+        cik TEXT,
+        company_name TEXT,
+        filing_date TEXT,
+        accession TEXT,
+        form TEXT,
+        cost_metric TEXT,
+        cost_value REAL,
+        cost_unit TEXT,
+        cost_commodity TEXT,
+        cost_raw TEXT,
+        cost_snippet TEXT,
+        cost_year TEXT,
+        peer_cohort TEXT,
+        peer_count INTEGER,
+        cost_rank INTEGER,
+        cost_rank_pct REAL,
+        low_cost_quartile INTEGER,
+        commodities_json TEXT,
+        all_hits_json TEXT,
+        parse_notes_json TEXT,
+        last_scanned TEXT,
+        scan_error TEXT
+    )
+    """,
+)
 
 
 def _conn(db_path: str = DEFAULT_DB) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS mining_costs_summary (
-            ticker TEXT PRIMARY KEY,
-            cik TEXT,
-            company_name TEXT,
-            filing_date TEXT,
-            accession TEXT,
-            form TEXT,
-            cost_metric TEXT,
-            cost_value REAL,
-            cost_unit TEXT,
-            cost_commodity TEXT,
-            cost_raw TEXT,
-            cost_snippet TEXT,
-            cost_year TEXT,
-            peer_cohort TEXT,
-            peer_count INTEGER,
-            cost_rank INTEGER,
-            cost_rank_pct REAL,
-            low_cost_quartile INTEGER,
-            commodities_json TEXT,
-            all_hits_json TEXT,
-            parse_notes_json TEXT,
-            last_scanned TEXT,
-            scan_error TEXT
-        )
-        """
-    )
-    conn.commit()
-    return conn
+    return connect_db(db_path, schema_key="mining_costs", ddl=_COSTS_DDL)
 
 
-def load_mining_universe() -> dict:
-    defaults: dict[str, Any] = {
-        "companies": [],
-        "fetch_sleep_seconds": EDGAR_FETCH_SLEEP_DEFAULT,
-        "description": "",
-    }
-    if not UNIVERSE_PATH.exists():
-        return defaults
-    try:
-        with open(UNIVERSE_PATH, encoding="utf-8") as f:
-            raw = yaml.safe_load(f) or {}
-        for k, v in defaults.items():
-            if k not in raw:
-                raw[k] = v
-        return raw
-    except Exception as e:
-        logger.warning("Failed to load mining universe: %s", e)
-        return defaults
-
-
-def _norm_cik(cik: Any) -> str:
-    if cik is None:
-        return ""
-    s = re.sub(r"\D", "", str(cik))
-    return s.lstrip("0") or "0"
-
-
-def _resolve_company(entry: dict):
-    from edgar import Company
-
-    cik = entry.get("cik")
-    ticker = (entry.get("ticker") or "").strip().upper()
-    last_err = None
-    if cik is not None and str(cik).strip():
-        try:
-            return Company(int(str(cik).strip()))
-        except Exception as e:
-            last_err = e
-    if ticker:
-        try:
-            return Company(ticker)
-        except Exception as e:
-            last_err = e
-    raise last_err or RuntimeError(f"Cannot resolve company for {entry}")
-
-
-def _preferred_commodities(entry: dict) -> list[str]:
-    out = []
-    for c in entry.get("commodities") or []:
-        s = str(c).strip().lower()
-        if s in ("met", "metallurgical", "coke"):
-            s = "coal"
-        if s:
-            out.append(s)
-    return out
+def load_mining_universe(force: bool = False) -> dict:
+    return _shared_load_mining_universe(force=force, universe_path=UNIVERSE_PATH)
 
 
 def _parse_number(raw: str) -> float | None:
@@ -1077,11 +1014,30 @@ def attach_costs_to_stock(stock: dict, summary: dict | None = None, ticker: str 
 
 
 def enrich_stocks_costs_cached(stocks: list) -> list:
+    if not stocks:
+        return stocks
+    try:
+        by_ticker = {
+            (s.get("ticker") or "").strip().upper(): s
+            for s in list_costs_summaries()
+            if s.get("ticker")
+        }
+    except Exception as e:
+        logger.warning("enrich_stocks_costs_cached batch load failed: %s", e)
+        by_ticker = {}
     for stock in stocks:
         sym = (stock.get("ticker") or "").strip().upper()
         if not sym:
             continue
-        attach_costs_to_stock(stock, ticker=sym)
+        summary = by_ticker.get(sym.replace(".AX", ""))
+        if summary:
+            attach_costs_to_stock(stock, summary=summary, ticker=sym)
+        else:
+            stock["unit_costs"] = {
+                "scanned": False,
+                "cost_value": None,
+                "low_cost_quartile": False,
+            }
     return stocks
 
 

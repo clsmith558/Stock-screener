@@ -86,23 +86,27 @@ def _sanitize_for_json(val):
     return val
 
 
+_BUYBACKS_DDL = (
+    """
+    CREATE TABLE IF NOT EXISTS buyback_registry (
+        yf_symbol TEXT PRIMARY KEY,
+        row_json TEXT NOT NULL,
+        built_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS buyback_registry_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )
+    """,
+)
+
+
 def _buybacks_conn(db_path: str = DEFAULT_UNIVERSE_DB):
-    conn = sqlite3.connect(db_path)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS buyback_registry (
-            yf_symbol TEXT PRIMARY KEY,
-            row_json TEXT NOT NULL,
-            built_at TEXT NOT NULL
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS buyback_registry_meta (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    """)
-    conn.commit()
-    return conn
+    from data.db import connect_db
+
+    return connect_db(db_path, schema_key="buybacks", ddl=_BUYBACKS_DDL)
 
 
 def _registry_get_meta(key: str, db_path: str = DEFAULT_UNIVERSE_DB) -> str:
@@ -112,6 +116,13 @@ def _registry_get_meta(key: str, db_path: str = DEFAULT_UNIVERSE_DB) -> str:
     ).fetchone()
     conn.close()
     return row[0] if row else ""
+
+
+def _registry_get_all_meta(db_path: str = DEFAULT_UNIVERSE_DB) -> dict[str, str]:
+    conn = _buybacks_conn(db_path)
+    rows = conn.execute("SELECT key, value FROM buyback_registry_meta").fetchall()
+    conn.close()
+    return {k: (v or "") for k, v in rows}
 
 
 def _registry_set_meta(pairs: dict, db_path: str = DEFAULT_UNIVERSE_DB):
@@ -135,22 +146,24 @@ def _csv_mtime(csv_path: Path = None) -> str:
 def _registry_needs_rebuild(db_path: str = DEFAULT_UNIVERSE_DB) -> bool:
     conn = _buybacks_conn(db_path)
     count = conn.execute("SELECT COUNT(*) FROM buyback_registry").fetchone()[0]
+    meta_rows = conn.execute("SELECT key, value FROM buyback_registry_meta").fetchall()
     conn.close()
     if not count:
         return True
-    stored_tse = _registry_get_meta("tse_csv_mtime", db_path)
-    stored_hk = _registry_get_meta("hk_csv_mtime", db_path)
-    stored_hk_di = _registry_get_meta("hk_insider_csv_mtime", db_path)
-    stored_asx_insider = _registry_get_meta("asx_insider_rows", db_path)
-    stored_asx_buyback = _registry_get_meta("asx_buyback_rows", db_path)
-    stored_us_buyback = _registry_get_meta("us_buyback_rows", db_path)
-    stored_us_insider = _registry_get_meta("us_insider_rows", db_path)
-    current_asx_insider = _count_asx_insider_purchases()
-    current_asx_buyback = _count_asx_buyback_events()
-    current_us_buyback = _count_us_buyback_events()
-    current_us_insider = _count_us_insider_purchases()
+    meta = {k: (v or "") for k, v in meta_rows}
+    stored_tse = meta.get("tse_csv_mtime", "")
+    stored_hk = meta.get("hk_csv_mtime", "")
+    stored_hk_di = meta.get("hk_insider_csv_mtime", "")
+    stored_asx_insider = meta.get("asx_insider_rows", "")
+    stored_asx_buyback = meta.get("asx_buyback_rows", "")
+    stored_us_buyback = meta.get("us_buyback_rows", "")
+    stored_us_insider = meta.get("us_insider_rows", "")
+    current_asx_insider = _count_asx_insider_purchases(db_path)
+    current_asx_buyback = _count_asx_buyback_events(db_path)
+    current_us_buyback = _count_us_buyback_events(db_path)
+    current_us_insider = _count_us_insider_purchases(db_path)
     # Force rebuild when Latest Buyback semantics change (completed purchase period only).
-    stored_semantics = _registry_get_meta("latest_buyback_semantics", db_path)
+    stored_semantics = meta.get("latest_buyback_semantics", "")
     return (
         stored_tse != _csv_mtime(TSE_CSV_PATH)
         or stored_hk != _csv_mtime(HK_CSV_PATH)
@@ -372,10 +385,18 @@ def _ydat_from_csv_snapshot(agg: dict, sym: str) -> dict:
     }
 
 
+_csv_df_cache: dict[str, tuple[float, pd.DataFrame]] = {}
+
+
 def load_tse_events(csv_path: Path = None) -> pd.DataFrame:
     path = Path(csv_path or DEFAULT_CSV_PATH)
     if not path.exists():
         return pd.DataFrame()
+    key = f"tse:{path}"
+    mtime = path.stat().st_mtime
+    cached = _csv_df_cache.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
     try:
         df = pd.read_csv(path, encoding="utf-8")
     except Exception as e:
@@ -395,6 +416,7 @@ def load_tse_events(csv_path: Path = None) -> pd.DataFrame:
         df["sharesOutstanding"] = pd.to_numeric(df["sharesOutstanding"], errors="coerce")
     df["yf_symbol"] = df["Code"].map(_code_to_yf_symbol)
     df["source"] = "TSE"
+    _csv_df_cache[key] = (mtime, df)
     return df
 
 
@@ -402,6 +424,11 @@ def load_hk_insider_events(csv_path: Path = None) -> pd.DataFrame:
     path = Path(csv_path or HK_INSIDER_CSV_PATH)
     if not path.exists():
         return pd.DataFrame()
+    key = f"hk_di:{path}"
+    mtime = path.stat().st_mtime
+    cached = _csv_df_cache.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
     try:
         df = pd.read_csv(path, encoding="utf-8")
     except Exception as e:
@@ -416,6 +443,7 @@ def load_hk_insider_events(csv_path: Path = None) -> pd.DataFrame:
     df["Average price"] = pd.to_numeric(df["Average price"], errors="coerce")
     df["yf_symbol"] = df["Stock code"].map(_hk_code_to_yf_symbol)
     df["source"] = "HKEX-DI"
+    _csv_df_cache[key] = (mtime, df)
     return df
 
 
@@ -423,6 +451,11 @@ def load_hk_events(csv_path: Path = None) -> pd.DataFrame:
     path = Path(csv_path or HK_CSV_PATH)
     if not path.exists():
         return pd.DataFrame()
+    key = f"hk:{path}"
+    mtime = path.stat().st_mtime
+    cached = _csv_df_cache.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
     try:
         df = pd.read_csv(path, encoding="utf-8")
     except Exception as e:
@@ -442,6 +475,7 @@ def load_hk_events(csv_path: Path = None) -> pd.DataFrame:
         df["sharesOutstanding"] = pd.to_numeric(df["sharesOutstanding"], errors="coerce")
     df["yf_symbol"] = df["Stock code"].map(_hk_code_to_yf_symbol)
     df["source"] = "HKEX"
+    _csv_df_cache[key] = (mtime, df)
     return df
 
 
@@ -479,30 +513,46 @@ def _director_from_asx_headline(headline: str) -> str:
     return ""
 
 
-def load_asx_insider_events(db_path: str = DEFAULT_UNIVERSE_DB) -> list:
+def load_asx_insider_events(
+    db_path: str = DEFAULT_UNIVERSE_DB,
+    *,
+    ticker: str | None = None,
+) -> list:
     try:
         conn = sqlite3.connect(db_path)
-        rows = conn.execute(
-            """
-            SELECT ticker, date, headline, url
-            FROM announcements
-            WHERE classification = 'insider_purchase'
-            ORDER BY date DESC
-            """
-        ).fetchall()
+        if ticker:
+            base = ticker.strip().upper().replace(".AX", "")
+            rows = conn.execute(
+                """
+                SELECT ticker, date, headline, url
+                FROM announcements
+                WHERE classification = 'insider_purchase' AND ticker = ?
+                ORDER BY date DESC
+                """,
+                (base,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT ticker, date, headline, url
+                FROM announcements
+                WHERE classification = 'insider_purchase'
+                ORDER BY date DESC
+                """
+            ).fetchall()
         conn.close()
     except Exception as e:
         logger.warning("ASX insider load failed: %s", e)
         return []
 
     events = []
-    for ticker, date, headline, url in rows:
-        sym = _asx_base_to_yf(ticker)
+    for t_base, date, headline, url in rows:
+        sym = _asx_base_to_yf(t_base)
         if not sym:
             continue
         events.append({
             "yf_symbol": sym,
-            "ticker_base": ticker,
+            "ticker_base": t_base,
             "date": date,
             "headline": headline or "",
             "url": url or "",
@@ -514,7 +564,14 @@ def load_asx_insider_events(db_path: str = DEFAULT_UNIVERSE_DB) -> list:
     return events
 
 
-def load_asx_buyback_events(db_path: str = DEFAULT_UNIVERSE_DB) -> list:
+_initialized_asx_ann_dbs: set[str] = set()
+
+
+def load_asx_buyback_events(
+    db_path: str = DEFAULT_UNIVERSE_DB,
+    *,
+    ticker: str | None = None,
+) -> list:
     """
     Load ASX buy-back announcements with optional PDF-parsed metrics.
 
@@ -525,22 +582,38 @@ def load_asx_buyback_events(db_path: str = DEFAULT_UNIVERSE_DB) -> list:
     """
     try:
         conn = sqlite3.connect(db_path)
-        # Ensure metric columns exist (added by asx_announcements.init_db)
-        try:
-            from asx_announcements import init_db as _init_asx_db
-            _init_asx_db(db_path)
-        except Exception:
-            pass
-        rows = conn.execute(
-            """
-            SELECT ticker, date, headline, url,
-                   shares_purchased, shares_before, price_high, price_low,
-                   price_avg, consideration, metrics_json
-            FROM announcements
-            WHERE classification = 'buyback'
-            ORDER BY date DESC
-            """
-        ).fetchall()
+        # Ensure metric columns exist once per db_path (added by asx_announcements.init_db)
+        if db_path not in _initialized_asx_ann_dbs:
+            try:
+                from asx_announcements import init_db as _init_asx_db
+                _init_asx_db(db_path)
+                _initialized_asx_ann_dbs.add(db_path)
+            except Exception:
+                pass
+        if ticker:
+            base = ticker.strip().upper().replace(".AX", "")
+            rows = conn.execute(
+                """
+                SELECT ticker, date, headline, url,
+                       shares_purchased, shares_before, price_high, price_low,
+                       price_avg, consideration, metrics_json
+                FROM announcements
+                WHERE classification = 'buyback' AND ticker = ?
+                ORDER BY date DESC
+                """,
+                (base,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT ticker, date, headline, url,
+                       shares_purchased, shares_before, price_high, price_low,
+                       price_avg, consideration, metrics_json
+                FROM announcements
+                WHERE classification = 'buyback'
+                ORDER BY date DESC
+                """
+            ).fetchall()
         conn.close()
     except Exception as e:
         logger.warning("ASX buyback load failed: %s", e)
@@ -548,7 +621,7 @@ def load_asx_buyback_events(db_path: str = DEFAULT_UNIVERSE_DB) -> list:
 
     events = []
     for row in rows:
-        ticker, date, headline, url = row[0], row[1], row[2], row[3]
+        t_base, date, headline, url = row[0], row[1], row[2], row[3]
         shares_purchased = row[4]
         shares_before = row[5]
         price_high = row[6]
@@ -563,7 +636,7 @@ def load_asx_buyback_events(db_path: str = DEFAULT_UNIVERSE_DB) -> list:
             except Exception:
                 metrics = {}
 
-        sym = _asx_base_to_yf(ticker)
+        sym = _asx_base_to_yf(t_base)
         if not sym:
             continue
 
@@ -585,7 +658,7 @@ def load_asx_buyback_events(db_path: str = DEFAULT_UNIVERSE_DB) -> list:
 
         events.append({
             "yf_symbol": sym,
-            "ticker_base": ticker,
+            "ticker_base": t_base,
             "date": date,
             "headline": headline or "",
             "url": url or "",
@@ -641,10 +714,14 @@ def _count_us_insider_purchases(db_path: str = DEFAULT_UNIVERSE_DB) -> int:
         return 0
 
 
-def load_us_insider_events(db_path: str = DEFAULT_UNIVERSE_DB) -> list:
+def load_us_insider_events(
+    db_path: str = DEFAULT_UNIVERSE_DB,
+    *,
+    yf_symbol: str | None = None,
+) -> list:
     try:
         from data.us_insider import load_us_insider_events as _load
-        return _load(db_path)
+        return _load(db_path, yf_symbol=yf_symbol)
     except Exception as e:
         logger.warning("US insider load failed: %s", e)
         return []
@@ -700,10 +777,14 @@ def _aggregate_us_insider(events: list, year: int) -> dict:
     return out
 
 
-def load_us_buyback_events(db_path: str = DEFAULT_UNIVERSE_DB) -> list:
+def load_us_buyback_events(
+    db_path: str = DEFAULT_UNIVERSE_DB,
+    *,
+    yf_symbol: str | None = None,
+) -> list:
     try:
         from data.us_buybacks import load_us_buyback_events as _load
-        return _load(db_path)
+        return _load(db_path, yf_symbol=yf_symbol)
     except Exception as e:
         logger.warning("US buyback load failed: %s", e)
         return []
@@ -750,7 +831,7 @@ def build_quarterly_buyback_breakdown(
     else:
         try:
             from data.us_buybacks import load_us_buyback_repurchases
-            reps = [r for r in load_us_buyback_repurchases() if r.get("yf_symbol") == sym]
+            reps = load_us_buyback_repurchases(yf_symbol=sym)
         except Exception:
             reps = []
         periods = list(_dedupe_us_repurchase_rows(reps, datetime.now().year).values())
@@ -1788,7 +1869,7 @@ def _rebuild_registry(force_yf: bool = False) -> tuple:
 def _apply_registry_to_cache(full_rows: list, meta: dict, timings: dict, lite: bool = True) -> list:
     now = time.time()
     list_rows = [_slim_list_row(r) for r in full_rows] if lite else full_rows
-    list_rows = [_sanitize_for_json(r) for r in list_rows]
+    list_rows = _finalize_buyback_list_rows([_sanitize_for_json(r) for r in list_rows])
     _buybacks_cache.update({
         "data": list_rows,
         "full_data": full_rows,
@@ -1807,7 +1888,7 @@ def _apply_registry_to_cache(full_rows: list, meta: dict, timings: dict, lite: b
         "timings_ms": timings,
         "registry_source": meta.get("source", "rebuild"),
     })
-    return list_rows
+    return [dict(r) for r in list_rows]
 
 
 def _refresh_registry_from_cache(lite: bool = True) -> list:
@@ -1842,21 +1923,19 @@ def fetch_buyback_stocks(
         and not force_yf
         and not force_registry
     ):
-        rows = [_sanitize_for_json(r) for r in _buybacks_cache["data"]]
-        return _finalize_buyback_list_rows(rows)
+        return [dict(r) for r in _buybacks_cache["data"]]
 
     if force_yf or force_registry or _registry_needs_rebuild():
         signal_rows, composed, meta, timings = _rebuild_registry(force_yf=force_yf)
         _save_registry(signal_rows, meta)
-        list_rows = _apply_registry_to_cache(composed, meta, timings, lite=lite)
-        return _finalize_buyback_list_rows(list_rows)
+        return _apply_registry_to_cache(composed, meta, timings, lite=lite)
 
     t0 = time.time()
     list_rows = _load_registry_from_db(lite=lite)
     load_ms = round((time.time() - t0) * 1000, 1)
     logger.info("Buybacks registry loaded from SQLite: %d rows in %s ms", len(list_rows), load_ms)
 
-    list_rows = [_sanitize_for_json(r) for r in list_rows]
+    list_rows = _finalize_buyback_list_rows([_sanitize_for_json(r) for r in list_rows])
     _buybacks_cache.update({
         "data": list_rows,
         "ts": now,
@@ -1874,7 +1953,7 @@ def fetch_buyback_stocks(
         "timings_ms": {"registry_load_ms": load_ms, "total_ms": load_ms},
         "registry_source": "sqlite",
     })
-    return _finalize_buyback_list_rows(list_rows)
+    return [dict(r) for r in list_rows]
 
 
 def get_buybacks_meta() -> dict:
@@ -2253,9 +2332,7 @@ def _load_repurchase_history_for_symbol(
                 })
 
     elif sym.endswith(".AX"):
-        for ev in load_asx_buyback_events():
-            if ev.get("yf_symbol") != sym:
-                continue
+        for ev in load_asx_buyback_events(ticker=sym):
             d = ev.get("date") or ""
             if not d or d < cutoff.isoformat():
                 continue
@@ -2271,17 +2348,15 @@ def _load_repurchase_history_for_symbol(
         if is_us_edgar_eligible(sym):
             try:
                 from data.us_buybacks import load_us_buyback_repurchases
-                us_rows = load_us_buyback_repurchases()
+                us_rows = load_us_buyback_repurchases(yf_symbol=sym)
             except Exception:
                 us_rows = []
             if not us_rows:
                 us_rows = [
-                    ev for ev in load_us_buyback_events()
-                    if ev.get("yf_symbol") == sym and (ev.get("shares") or ev.get("price"))
+                    ev for ev in load_us_buyback_events(yf_symbol=sym)
+                    if ev.get("shares") or ev.get("price")
                 ]
             for ev in us_rows:
-                if ev.get("yf_symbol") != sym:
-                    continue
                 d = ev.get("date") or ev.get("period_end") or ""
                 if not d or d < cutoff.isoformat():
                     continue
@@ -2330,9 +2405,7 @@ def _load_insider_purchases_for_symbol(
                 })
 
     elif sym.endswith(".AX"):
-        for ev in load_asx_insider_events():
-            if ev.get("yf_symbol") != sym:
-                continue
+        for ev in load_asx_insider_events(ticker=sym):
             d = ev.get("date") or ""
             if not d or d < cutoff.isoformat():
                 continue
@@ -2350,9 +2423,7 @@ def _load_insider_purchases_for_symbol(
     else:
         from data.edgar_metrics import is_us_edgar_eligible
         if is_us_edgar_eligible(sym):
-            for ev in load_us_insider_events():
-                if ev.get("yf_symbol") != sym:
-                    continue
+            for ev in load_us_insider_events(yf_symbol=sym):
                 d = ev.get("date") or ""
                 if not d or d < cutoff.isoformat():
                     continue

@@ -67,48 +67,52 @@ BUILTIN_LIST_IDS = (
 )
 
 
+_BUSINESS_LISTS_DDL = (
+    """
+    CREATE TABLE IF NOT EXISTS business_list_registry (
+        list_id TEXT PRIMARY KEY,
+        filename TEXT,
+        display_name TEXT,
+        ticker_count INTEGER,
+        scanned_at TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS business_list_entries (
+        list_id TEXT,
+        yf_symbol TEXT,
+        raw_ticker TEXT,
+        PRIMARY KEY (list_id, yf_symbol)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS business_list_yf_cache (
+        yf_symbol TEXT PRIMARY KEY,
+        last_updated TEXT,
+        price REAL,
+        low_52w REAL,
+        high_52w REAL,
+        name TEXT,
+        sector TEXT,
+        metrics_json TEXT,
+        p_fcf REAL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS business_list_inactive (
+        yf_symbol TEXT PRIMARY KEY,
+        reason TEXT,
+        marked_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        source TEXT
+    )
+    """,
+)
+
+
 def _lists_conn(db_path: str = DEFAULT_UNIVERSE_DB):
-    conn = sqlite3.connect(db_path)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS business_list_registry (
-            list_id TEXT PRIMARY KEY,
-            filename TEXT,
-            display_name TEXT,
-            ticker_count INTEGER,
-            scanned_at TEXT
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS business_list_entries (
-            list_id TEXT,
-            yf_symbol TEXT,
-            raw_ticker TEXT,
-            PRIMARY KEY (list_id, yf_symbol)
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS business_list_yf_cache (
-            yf_symbol TEXT PRIMARY KEY,
-            last_updated TEXT,
-            price REAL,
-            low_52w REAL,
-            high_52w REAL,
-            name TEXT,
-            sector TEXT,
-            metrics_json TEXT,
-            p_fcf REAL
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS business_list_inactive (
-            yf_symbol TEXT PRIMARY KEY,
-            reason TEXT,
-            marked_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            source TEXT
-        )
-    """)
-    conn.commit()
-    return conn
+    from data.db import connect_db
+
+    return connect_db(db_path, schema_key="business_lists", ddl=_BUSINESS_LISTS_DDL)
 
 
 def _normalize_raw_ticker(raw: str) -> str:
@@ -259,8 +263,40 @@ def _parse_csv_tickers(path: Path) -> list:
     return out
 
 
-def load_sp500_tickers() -> list:
-    """Load current S&P 500 constituents (Yahoo-compatible symbols)."""
+_sp500_cache: tuple[float, list[str]] | None = None
+_BUILTIN_SYNC_TTL_HOURS = 24
+_scan_lists_cache: dict[str, tuple[float, list]] = {}
+_SCAN_LISTS_MEM_TTL_SEC = 60.0
+
+
+def _load_sp500_from_db(db_path: str = DEFAULT_UNIVERSE_DB) -> list[str]:
+    try:
+        conn = _lists_conn(db_path)
+        rows = conn.execute(
+            "SELECT yf_symbol FROM business_list_entries WHERE list_id=? ORDER BY yf_symbol",
+            (BUILTIN_SP500_LIST_ID,),
+        ).fetchall()
+        conn.close()
+        if rows:
+            return [r[0] for r in rows]
+    except Exception:
+        pass
+    return []
+
+
+def load_sp500_tickers(force_live: bool = False) -> list:
+    """Load current S&P 500 constituents (SQLite/memory cache first unless force_live=True, else Wikipedia)."""
+    global _sp500_cache
+    now_ts = time.time()
+    if not force_live and _sp500_cache is not None and (now_ts - _sp500_cache[0]) < 3600.0:
+        return list(_sp500_cache[1])
+
+    if not force_live:
+        db_syms = _load_sp500_from_db()
+        if len(db_syms) >= 450:
+            _sp500_cache = (now_ts, db_syms)
+            return list(db_syms)
+
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
     headers = {"User-Agent": wiki_user_agent()}
     try:
@@ -284,23 +320,16 @@ def load_sp500_tickers() -> list:
             sym = sym.replace(".", "-")
             tickers.append(sym)
         if tickers:
+            _sp500_cache = (now_ts, tickers)
             return tickers
     except Exception as e:
         logger.warning(f"S&P 500 Wikipedia load failed: {e}")
 
     # Fallback: reuse last registered SP500 universe from SQLite
-    try:
-        conn = _lists_conn()
-        rows = conn.execute(
-            "SELECT yf_symbol FROM business_list_entries WHERE list_id=? ORDER BY yf_symbol",
-            (BUILTIN_SP500_LIST_ID,),
-        ).fetchall()
-        conn.close()
-        if rows:
-            return [r[0] for r in rows]
-    except Exception:
-        pass
-    return []
+    fallback = _load_sp500_from_db()
+    if fallback:
+        _sp500_cache = (now_ts, fallback)
+    return fallback
 
 
 def _register_builtin_list(conn, list_id: str, display_name: str, symbols: list, scanned_at: str):
@@ -317,7 +346,7 @@ def _register_builtin_list(conn, list_id: str, display_name: str, symbols: list,
     )
 
 
-def refresh_us_index_builtin_lists(db_path: str = DEFAULT_UNIVERSE_DB) -> list:
+def refresh_us_index_builtin_lists(db_path: str = DEFAULT_UNIVERSE_DB, force_live: bool = True) -> list:
     """
     Re-fetch S&P 500, Russell 1000, and Nasdaq-100 constituents and re-register
     the builtin business lists. Intended for ~6-month cadence (Wikipedia sources).
@@ -332,7 +361,7 @@ def refresh_us_index_builtin_lists(db_path: str = DEFAULT_UNIVERSE_DB) -> list:
         # Drop confirmed-inactive so delisted leavers do not re-enter
         return filter_active_symbols(list(symbols or []), confirmed_only=True)
 
-    sp500 = _clean(load_sp500_tickers())
+    sp500 = _clean(load_sp500_tickers(force_live=force_live))
     _register_builtin_list(conn, BUILTIN_SP500_LIST_ID, "US S&P 500", sp500, now)
     registered.append({
         "list_id": BUILTIN_SP500_LIST_ID,
@@ -342,7 +371,7 @@ def refresh_us_index_builtin_lists(db_path: str = DEFAULT_UNIVERSE_DB) -> list:
         "source": "wikipedia",
     })
 
-    r1k = _clean(load_russell1000_tickers())
+    r1k = _clean(load_russell1000_tickers(force_live=force_live))
     _register_builtin_list(conn, BUILTIN_RUSSELL1000_LIST_ID, "US Russell 1000", r1k, now)
     registered.append({
         "list_id": BUILTIN_RUSSELL1000_LIST_ID,
@@ -352,7 +381,7 @@ def refresh_us_index_builtin_lists(db_path: str = DEFAULT_UNIVERSE_DB) -> list:
         "source": "wikipedia",
     })
 
-    ndx = _clean(load_nasdaq100_tickers())
+    ndx = _clean(load_nasdaq100_tickers(force_live=force_live))
     _register_builtin_list(conn, BUILTIN_NASDAQ100_LIST_ID, "US Nasdaq-100", ndx, now)
     registered.append({
         "list_id": BUILTIN_NASDAQ100_LIST_ID,
@@ -364,6 +393,7 @@ def refresh_us_index_builtin_lists(db_path: str = DEFAULT_UNIVERSE_DB) -> list:
 
     conn.commit()
     conn.close()
+    _scan_lists_cache.pop(db_path, None)
     logger.info(
         "US index builtins refreshed: SP500=%d Russell1000=%d Nasdaq100=%d",
         len(sp500),
@@ -373,8 +403,37 @@ def refresh_us_index_builtin_lists(db_path: str = DEFAULT_UNIVERSE_DB) -> list:
     return registered
 
 
-def sync_builtin_lists(db_path: str = DEFAULT_UNIVERSE_DB) -> list:
-    """Register built-in ASX + S&P 500 lists (refreshed from official sources)."""
+def _builtins_are_fresh(db_path: str = DEFAULT_UNIVERSE_DB) -> bool:
+    """Return True if all built-in lists exist in business_list_registry and were synced within TTL."""
+    try:
+        conn = _lists_conn(db_path)
+        rows = conn.execute(
+            "SELECT list_id, ticker_count, scanned_at FROM business_list_registry WHERE list_id LIKE '__builtin__:%'"
+        ).fetchall()
+        conn.close()
+        by_id = {r[0]: (r[1] or 0, r[2]) for r in rows}
+        now = datetime.now()
+        max_age = timedelta(hours=_BUILTIN_SYNC_TTL_HOURS)
+        for lid in BUILTIN_LIST_IDS:
+            if lid not in by_id:
+                return False
+            count, scanned_at = by_id[lid]
+            if count <= 0 and lid != BUILTIN_PARIAH_LIST_ID:
+                return False
+            if not scanned_at:
+                return False
+            if now - datetime.fromisoformat(scanned_at) > max_age:
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def sync_builtin_lists(db_path: str = DEFAULT_UNIVERSE_DB, force: bool = False) -> list:
+    """Register built-in ASX + S&P 500 lists (refreshed from official sources when stale or forced)."""
+    if not force and _builtins_are_fresh(db_path):
+        return []
+
     from data.asx import load_asx_ticker_universe, ASX_MONITORED_TICKERS
 
     conn = _lists_conn(db_path)
@@ -398,9 +457,9 @@ def sync_builtin_lists(db_path: str = DEFAULT_UNIVERSE_DB) -> list:
     conn.commit()
     conn.close()
 
-    # S&P 500 / Russell / Nasdaq — shared helper (also used by 6-month job)
+    # S&P 500 / Russell / Nasdaq — use cached DB/memory unless force=True
     try:
-        registered.extend(refresh_us_index_builtin_lists(db_path=db_path))
+        registered.extend(refresh_us_index_builtin_lists(db_path=db_path, force_live=force))
     except Exception as e:
         logger.warning("US index builtin lists skipped: %s", e)
 
@@ -420,6 +479,7 @@ def sync_builtin_lists(db_path: str = DEFAULT_UNIVERSE_DB) -> list:
         registered.append(sync_builtin_pariah_list(db_path=db_path))
     except Exception as e:
         logger.warning("Pariah builtin list sync skipped: %s", e)
+    _scan_lists_cache.pop(db_path, None)
     return registered
 
 
@@ -436,6 +496,7 @@ def sync_builtin_pariah_list(db_path: str = DEFAULT_UNIVERSE_DB) -> dict:
     )
     conn.commit()
     conn.close()
+    _scan_lists_cache.pop(db_path, None)
     return {
         "list_id": BUILTIN_PARIAH_LIST_ID,
         "filename": BUILTIN_PARIAH_LIST_ID,
@@ -464,11 +525,18 @@ def _is_junk_list_file(name: str) -> bool:
 
 def scan_business_lists(force: bool = False, db_path: str = DEFAULT_UNIVERSE_DB) -> list:
     """Scan Business lists folder and register CSV files + tickers in SQLite."""
-    sync_builtin_lists(db_path=db_path)
+    now_ts = time.time()
+    cached = _scan_lists_cache.get(db_path)
+    if not force and cached and (now_ts - cached[0]) < _SCAN_LISTS_MEM_TTL_SEC:
+        return list(cached[1])
+
+    sync_builtin_lists(db_path=db_path, force=force)
 
     if not BUSINESS_LISTS_DIR.is_dir():
         logger.warning(f"Business lists folder not found: {BUSINESS_LISTS_DIR}")
-        return get_available_lists_from_db(db_path)
+        res = get_available_lists_from_db(db_path)
+        _scan_lists_cache[db_path] = (time.time(), res)
+        return res
 
     conn = _lists_conn(db_path)
     registered = []
@@ -543,7 +611,9 @@ def scan_business_lists(force: bool = False, db_path: str = DEFAULT_UNIVERSE_DB)
 
     conn.commit()
     conn.close()
-    return get_available_lists_from_db(db_path)
+    res = get_available_lists_from_db(db_path)
+    _scan_lists_cache[db_path] = (time.time(), res)
+    return res
 
 
 def get_available_lists_from_db(db_path: str = DEFAULT_UNIVERSE_DB) -> list:
@@ -595,46 +665,43 @@ def load_list_symbols(list_id: str, db_path: str = DEFAULT_UNIVERSE_DB) -> list:
     return symbols
 
 
+from data.yf_helpers import (  # noqa: E402
+    load_inactive_set_generic,
+    load_yf_cache_generic,
+    mark_inactive_generic,
+    remove_inactive_generic,
+    run_sequential_yf_fetch,
+    save_yf_cache_generic,
+    sync_inactive_from_cache_generic,
+)
+
+
 def load_inactive_symbols(confirmed_only: bool = False, db_path: str = DEFAULT_UNIVERSE_DB) -> set:
-    try:
-        conn = _lists_conn(db_path)
-        if confirmed_only:
-            ph = ",".join("?" for _ in TENTATIVE_INACTIVE_REASONS)
-            cur = conn.execute(
-                f"SELECT yf_symbol FROM business_list_inactive WHERE reason NOT IN ({ph})",
-                tuple(TENTATIVE_INACTIVE_REASONS),
-            )
-        else:
-            cur = conn.execute("SELECT yf_symbol FROM business_list_inactive")
-        out = {row[0] for row in cur.fetchall()}
-        conn.close()
-        return out
-    except Exception as e:
-        logger.warning(f"load_inactive_symbols failed: {e}")
-        return set()
+    return load_inactive_set_generic(
+        _lists_conn,
+        "business_list_inactive",
+        "yf_symbol",
+        db_path=db_path,
+        confirmed_only=confirmed_only,
+    )
 
 
 def mark_symbol_inactive(yf_symbol: str, reason: str, source: str = "yf_fetch", db_path: str = DEFAULT_UNIVERSE_DB):
     sym = (yf_symbol or "").strip().upper()
-    if not sym:
-        return
-    conn = _lists_conn(db_path)
-    conn.execute(
-        "INSERT OR REPLACE INTO business_list_inactive (yf_symbol, reason, marked_at, source) VALUES (?,?,?,?)",
-        (sym, reason or "unknown", datetime.now().isoformat(), source),
+    mark_inactive_generic(
+        _lists_conn,
+        "business_list_inactive",
+        "yf_symbol",
+        sym,
+        reason,
+        source=source,
+        db_path=db_path,
     )
-    conn.commit()
-    conn.close()
 
 
 def remove_inactive_symbol(yf_symbol: str, db_path: str = DEFAULT_UNIVERSE_DB):
     sym = (yf_symbol or "").strip().upper()
-    if not sym:
-        return
-    conn = _lists_conn(db_path)
-    conn.execute("DELETE FROM business_list_inactive WHERE yf_symbol=?", (sym,))
-    conn.commit()
-    conn.close()
+    remove_inactive_generic(_lists_conn, "business_list_inactive", "yf_symbol", sym, db_path=db_path)
 
 
 def filter_active_symbols(symbols: list, confirmed_only: bool = False) -> list:
@@ -650,23 +717,14 @@ def filter_active_symbols(symbols: list, confirmed_only: bool = False) -> list:
 
 
 def sync_inactive_from_cache(db_path: str = DEFAULT_UNIVERSE_DB) -> int:
-    try:
-        conn = _lists_conn(db_path)
-        cur = conn.execute("""
-            SELECT c.yf_symbol FROM business_list_yf_cache c
-            LEFT JOIN business_list_inactive i ON c.yf_symbol = i.yf_symbol
-            WHERE (c.price IS NULL OR c.price <= 0) AND i.yf_symbol IS NULL
-        """)
-        to_mark = [row[0] for row in cur.fetchall()]
-        conn.close()
-        for sym in to_mark:
-            mark_symbol_inactive(sym, "cached_zero_price", source="cache_scan", db_path=db_path)
-        if to_mark:
-            logger.info(f"Added {len(to_mark)} zero-price business symbols to inactive skip list")
-        return len(to_mark)
-    except Exception as e:
-        logger.warning(f"business sync_inactive_from_cache failed: {e}")
-        return 0
+    return sync_inactive_from_cache_generic(
+        _lists_conn,
+        "business_list_yf_cache",
+        "business_list_inactive",
+        "yf_symbol",
+        mark_symbol_inactive,
+        db_path=db_path,
+    )
 
 
 def _load_asx_yf_bridge(symbols: list, max_days: int = None, db_path: str = DEFAULT_UNIVERSE_DB) -> dict:
@@ -698,32 +756,14 @@ def load_yf_cached(symbols: list, max_days: int = None, db_path: str = DEFAULT_U
         return {}
     if max_days is None:
         max_days = YF_CACHE_MAX_AGE_DAYS
-    conn = _lists_conn(db_path)
-    ph = ",".join("?" for _ in symbols)
-    cur = conn.execute(
-        f"""SELECT yf_symbol, last_updated, price, low_52w, high_52w, name, sector, metrics_json, p_fcf
-            FROM business_list_yf_cache WHERE yf_symbol IN ({ph})""",
+    out = load_yf_cache_generic(
+        _lists_conn,
+        "business_list_yf_cache",
+        "yf_symbol",
         symbols,
+        max_days=max_days,
+        db_path=db_path,
     )
-    out = {}
-    for row in cur.fetchall():
-        sym, last_up, price, low, high, name, sector, mjson, pf = row
-        if _is_yf_fresh(last_up, max_days):
-            try:
-                metrics = json.loads(mjson) if mjson else {}
-            except Exception:
-                metrics = {}
-            out[sym] = {
-                "price": price or 0,
-                "low_52w": low or 0,
-                "high_52w": high or 0,
-                "name": name or sym,
-                "sector": sector or "Unknown",
-                "metrics": metrics,
-                "p_fcf": pf or 0,
-            }
-    conn.close()
-
     missing_ax = [s for s in symbols if s not in out and str(s).upper().endswith(".AX")]
     if missing_ax:
         bridged = _load_asx_yf_bridge(missing_ax, max_days=max_days, db_path=db_path)
@@ -732,25 +772,14 @@ def load_yf_cached(symbols: list, max_days: int = None, db_path: str = DEFAULT_U
 
 
 def save_yf_cached(yf_symbol: str, data: dict, db_path: str = DEFAULT_UNIVERSE_DB):
-    conn = _lists_conn(db_path)
-    metrics_json = json.dumps(data.get("metrics") or {})
-    conn.execute("""
-        INSERT OR REPLACE INTO business_list_yf_cache
-        (yf_symbol, last_updated, price, low_52w, high_52w, name, sector, metrics_json, p_fcf)
-        VALUES (?,?,?,?,?,?,?,?,?)
-    """, (
+    save_yf_cache_generic(
+        _lists_conn,
+        "business_list_yf_cache",
+        "yf_symbol",
         yf_symbol,
-        datetime.now().isoformat(),
-        data.get("price") or 0,
-        data.get("low_52w") or 0,
-        data.get("high_52w") or 0,
-        data.get("name") or yf_symbol,
-        data.get("sector") or "Unknown",
-        metrics_json,
-        data.get("p_fcf") or 0,
-    ))
-    conn.commit()
-    conn.close()
+        data,
+        db_path=db_path,
+    )
 
 
 def _fetch_yf_sequential(
@@ -763,142 +792,21 @@ def _fetch_yf_sequential(
 ) -> dict:
     if sleep_seconds is None:
         sleep_seconds = YF_FETCH_SLEEP_SECONDS
-    sync_inactive_from_cache()
-    symbols = filter_active_symbols(symbols, confirmed_only=retry_tentative_inactive)
-    inactive_skip = load_inactive_symbols(confirmed_only=retry_tentative_inactive)
-    out = {}
-    total = len(symbols)
-    if not total:
-        logger.info("Business list yf fetch: no active symbols.")
-        return out
-
-    # Default every 10 symbols so Task Scheduler console shows motion on long runs
-    if progress_every is None or progress_every < 1:
-        progress_every = 10
-    progress_every = min(progress_every, 25)
-
-    est_min = (total * float(sleep_seconds)) / 60.0
-    logger.info(
-        "%s: starting %d symbols (sleep=%.1fs, ~%.0f min if all succeed)",
-        progress_label,
-        total,
-        sleep_seconds,
-        est_min,
+    return run_sequential_yf_fetch(
+        symbols,
+        to_yf_symbol=lambda s: s,
+        sleep_seconds=sleep_seconds,
+        progress_every=progress_every,
+        retry_tentative_inactive=retry_tentative_inactive,
+        progress_label=progress_label,
+        on_progress=on_progress,
+        sync_inactive_fn=sync_inactive_from_cache,
+        filter_active_fn=filter_active_symbols,
+        load_inactive_fn=load_inactive_symbols,
+        mark_inactive_fn=mark_symbol_inactive,
+        remove_inactive_fn=remove_inactive_symbol,
+        save_cache_fn=save_yf_cached,
     )
-    t0 = time.monotonic()
-    done_ok = 0
-    for i, sym in enumerate(symbols):
-        n = i + 1
-        if sym in inactive_skip:
-            if n == 1 or n % progress_every == 0 or n == total:
-                logger.info(
-                    "  %s progress: %d/%d (ok=%d) skip-inactive %s",
-                    progress_label,
-                    n,
-                    total,
-                    done_ok,
-                    sym,
-                )
-            continue
-
-        # Progress before work so long .info() calls still show last ticker
-        if n == 1 or n % progress_every == 0 or n == total:
-            elapsed = time.monotonic() - t0
-            rate = done_ok / elapsed if elapsed > 1 else 0
-            remain = total - n
-            eta_min = (remain / rate / 60.0) if rate > 0 else (remain * sleep_seconds / 60.0)
-            logger.info(
-                "  %s progress: %d/%d (%.0f%%) ok=%d elapsed=%.0fs eta~%.0fmin now=%s",
-                progress_label,
-                n,
-                total,
-                100.0 * n / total,
-                done_ok,
-                elapsed,
-                eta_min,
-                sym,
-            )
-            if on_progress:
-                try:
-                    on_progress(n, total)
-                except Exception as ex:
-                    logger.warning("on_progress callback failed: %s", ex)
-
-        try:
-            yt = yf.Ticker(sym)
-            info = yt.info or {}
-            price = quote_price(info)
-
-            if price <= 0:
-                reason = _detect_yf_inactive(info, price) or "quote_not_found"
-                mark_symbol_inactive(sym, reason, source="yf_fetch")
-                inactive_skip.add(sym)
-                logger.info("  %s: inactive (%s) - skip", sym, reason)
-                time.sleep(sleep_seconds)
-                continue
-
-            low = _safe_float(info.get("fiftyTwoWeekLow"))
-            high = _safe_float(info.get("fiftyTwoWeekHigh"))
-            p_fcf = calc_p_fcf(info, price, ticker=sym)
-
-            ma_200w, pct_from_200w_ma = _calc_ma200w_gap(yt, price)
-            from data.yf_helpers import calc_last_52w_low_metrics, calc_own_history_cheapness, calc_rsi_metrics
-            low52 = calc_last_52w_low_metrics(yt)
-            metrics = _metrics_from_yf_info(info, price, ma_200w, pct_from_200w_ma, p_fcf, ticker=sym)
-            metrics["last_52w_low_date"] = low52.get("last_52w_low_date")
-            metrics["days_since_52w_low"] = low52.get("days_since_52w_low")
-            p_fcf = metrics.get("p_fcf") or p_fcf
-            own = calc_own_history_cheapness(
-                yt,
-                price=price,
-                pb=metrics.get("pb") or 0,
-                p_fcf=p_fcf or 0,
-                fcf_yield=metrics.get("fcf_yield") or 0,
-            )
-            metrics.update(own)
-            metrics.update(calc_rsi_metrics(yt, with_series=False))
-            data = {
-                "price": _safe_round(price, 2),
-                "low_52w": _safe_round(low, 2),
-                "high_52w": _safe_round(high, 2),
-                "name": info.get("shortName") or info.get("longName") or sym,
-                "sector": info.get("sector") or "Unknown",
-                "industry": info.get("industry") or info.get("industryDisp") or metrics.get("industry") or "",
-                "metrics": metrics,
-                "p_fcf": p_fcf,
-            }
-            out[sym] = data
-            save_yf_cached(sym, data)
-            remove_inactive_symbol(sym)
-            inactive_skip.discard(sym)
-            done_ok += 1
-            time.sleep(sleep_seconds)
-        except Exception as e:
-            msg = str(e)
-            logger.warning("  business yf error for %s: %s", sym, msg[:120])
-            inactive_reason = _inactive_from_yf_error(msg)
-            if inactive_reason:
-                mark_symbol_inactive(sym, inactive_reason, source="yf_error")
-                inactive_skip.add(sym)
-                logger.info("  %s: inactive (%s)", sym, inactive_reason)
-            else:
-                logger.info("  %s: transient error, will retry later", sym)
-            sleep = 30 if "Rate" in msg or "429" in msg else max(1.0, sleep_seconds / 2)
-            time.sleep(sleep)
-
-    logger.info(
-        "%s complete: saved %d / %d in %.0fs",
-        progress_label,
-        len(out),
-        total,
-        time.monotonic() - t0,
-    )
-    if on_progress:
-        try:
-            on_progress(total, total)
-        except Exception as ex:
-            logger.warning("on_progress callback failed: %s", ex)
-    return out
 
 
 def _placeholder_row(sym: str, list_meta: dict) -> dict:
@@ -1221,101 +1129,50 @@ def get_business_meta(list_id: str) -> dict:
 
 def _fetch_single_business(yf_symbol: str):
     """Rich detail fetch for business-list modal."""
+    from data.yf_helpers import attach_sec_and_mining_detail, fetch_yf_ticker_snapshot
+
     sym = (yf_symbol or "").strip().upper()
     if not sym:
         return None
     try:
-        yt = yf.Ticker(sym)
-        info = yt.info or {}
-        price = quote_price(info)
-        low, high = reconcile_52w_range(
-            price, info.get("fiftyTwoWeekLow"), info.get("fiftyTwoWeekHigh")
+        snap = fetch_yf_ticker_snapshot(sym, ticker_for_fx=sym, include_detail=True)
+        info = snap["info"]
+        metrics = snap["metrics"]
+
+        stock = _stock_row(
+            sym,
+            {
+                "price": snap["price"],
+                "low_52w": snap["low_52w"],
+                "high_52w": snap["high_52w"],
+                "name": snap["name"] or sym,
+                "sector": info.get("sector") or info.get("industry") or "Unknown",
+                "metrics": metrics,
+                "p_fcf": snap["p_fcf"],
+            },
+            {"list_id": "", "display_name": "Business list"},
         )
-        pct = pct_from_52w_low(price, low)
-
-        p_fcf = calc_p_fcf(info, price, ticker=sym)
-
-        ma_200w, pct_from_200w_ma = _calc_ma200w_gap(yt, price)
-        from data.yf_helpers import calc_last_52w_low_metrics, calc_own_history_cheapness, calc_rsi_metrics
-        low52 = calc_last_52w_low_metrics(yt)
-        metrics = _metrics_from_yf_info(info, price, ma_200w, pct_from_200w_ma, p_fcf, ticker=sym)
-        metrics["last_52w_low_date"] = low52.get("last_52w_low_date")
-        metrics["days_since_52w_low"] = low52.get("days_since_52w_low")
-        p_fcf = metrics.get("p_fcf") or p_fcf
-        metrics.update(
-            calc_own_history_cheapness(
-                yt,
-                price=price,
-                pb=metrics.get("pb") or 0,
-                p_fcf=p_fcf or 0,
-                fcf_yield=metrics.get("fcf_yield") or 0,
-            )
-        )
-        rsi_pack = calc_rsi_metrics(yt, with_series=True)
-        metrics["rsi"] = rsi_pack.get("rsi")
-        metrics["rsi_period"] = rsi_pack.get("rsi_period")
-        summary = _business_summary(info)
-        price_trend = _build_price_trend(yt, period="2y", interval="1wk")
-        earnings_history = _build_earnings_history(yt)
-
-        stock = _stock_row(sym, {
-            "price": price,
-            "low_52w": low,
-            "high_52w": high,
-            "name": info.get("shortName") or info.get("longName") or sym,
-            "sector": info.get("sector") or info.get("industry") or "Unknown",
-            "metrics": metrics,
-            "p_fcf": p_fcf,
-        }, {"list_id": "", "display_name": "Business list"})
         stock.update({
-            "summary": summary,
-            "price_trend": price_trend,
-            "rsi_trend": rsi_pack.get("rsi_trend") or [],
+            "summary": snap["summary"],
+            "price_trend": snap["price_trend"],
+            "rsi_trend": snap["rsi_trend"],
             "rsi": metrics.get("rsi"),
-            "earnings_history": earnings_history,
+            "earnings_history": snap["earnings_history"],
             "_live": True,
         })
-        stock["pct_from_52w_low"] = pct
+        stock["pct_from_52w_low"] = snap["pct_from_52w_low"]
         stock["_market"] = "business"
         if sym.endswith(".AX"):
             stock["name"] = asx_official_name(sym, fallback=stock.get("name") or sym)
-        try:
-            from data.edgar_metrics import is_us_edgar_eligible, fetch_edgar_metrics, attach_edgar_to_stock
-            if is_us_edgar_eligible(sym):
-                stock["_edgar_eligible"] = True
-                edgar = fetch_edgar_metrics(sym)
-                attach_edgar_to_stock(stock, edgar=edgar, ticker=sym)
-            else:
-                stock["_edgar_eligible"] = False
-        except Exception as ex:
-            logger.warning("EDGAR detail fetch failed for business %s: %s", sym, ex)
-        try:
-            from data.bankruptcy_reorg import attach_reorg_to_stock
-            attach_reorg_to_stock(stock, ticker=sym)
-        except Exception as ex:
-            logger.debug("Reorg attach skipped for business %s: %s", sym, ex)
-        try:
-            from data.mining_reserves import attach_reserves_to_stock
-            attach_reserves_to_stock(stock, ticker=sym)
-        except Exception as ex:
-            logger.debug("Reserves attach skipped for business %s: %s", sym, ex)
-        try:
-            from data.mining_costs import attach_costs_to_stock
-            attach_costs_to_stock(stock, ticker=sym)
-        except Exception as ex:
-            logger.debug("Unit-cost attach skipped for business %s: %s", sym, ex)
-        try:
-            from data.asx_mining import attach_asx_mining_to_stock, get_asx_mining_summary
-            if get_asx_mining_summary(sym, max_age_days=0):
-                attach_asx_mining_to_stock(stock, ticker=sym)
-        except Exception as ex:
-            logger.debug("ASX mining attach skipped for business %s: %s", sym, ex)
-        try:
-            from data.earnings_multiples import attach_earnings_multiples
-            # Prefer yfinance annual EPS when present; EDGAR path already ran above for US
-            attach_earnings_multiples(stock)
-        except Exception as ex:
-            logger.debug("earnings multiples skipped for %s: %s", sym, ex)
+
+        attach_sec_and_mining_detail(
+            stock,
+            sym,
+            include_edgar=True,
+            include_sec_mining=True,
+            include_asx_mining=True,
+        )
+
         try:
             from data.buybacks import build_quarterly_buyback_breakdown
 
@@ -1332,6 +1189,7 @@ def _fetch_single_business(yf_symbol: str):
             logger.debug("Quarterly buyback breakdown skipped for %s: %s", sym, ex)
         try:
             from data.buybacks import merge_buyback_registry_into_stock
+
             merge_buyback_registry_into_stock(stock, sym=sym)
         except Exception as ex:
             logger.debug("Buyback registry overlay skipped for %s: %s", sym, ex)
@@ -1339,6 +1197,7 @@ def _fetch_single_business(yf_symbol: str):
     except Exception as e:
         logger.warning(f"_fetch_single_business failed for {sym}: {e}")
         return None
+
 
 
 def rebuild_business_yf_cache(list_id: str, sleep_seconds: float = None):

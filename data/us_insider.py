@@ -24,45 +24,49 @@ INSIDER_FORM = "4"
 PURCHASE_CODES = frozenset({"P"})
 
 
+_US_INSIDER_DDL = (
+    """
+    CREATE TABLE IF NOT EXISTS us_insider_purchases (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticker TEXT NOT NULL,
+        yf_symbol TEXT NOT NULL,
+        date TEXT NOT NULL,
+        shares INTEGER,
+        price REAL,
+        insider TEXT,
+        position TEXT,
+        accession TEXT NOT NULL,
+        filing_date TEXT NOT NULL,
+        headline TEXT,
+        url TEXT,
+        source TEXT NOT NULL DEFAULT 'SEC-4',
+        created_at TEXT NOT NULL,
+        UNIQUE(accession, date, insider, shares, price)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS us_insider_scan_log (
+        accession TEXT PRIMARY KEY,
+        ticker TEXT NOT NULL,
+        scanned_at TEXT NOT NULL,
+        matched INTEGER NOT NULL DEFAULT 0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS us_insider_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_us_ins_ticker ON us_insider_purchases(yf_symbol)",
+    "CREATE INDEX IF NOT EXISTS idx_us_ins_date ON us_insider_purchases(date)",
+)
+
+
 def _conn(db_path: str = DEFAULT_UNIVERSE_DB):
-    conn = sqlite3.connect(db_path)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS us_insider_purchases (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ticker TEXT NOT NULL,
-            yf_symbol TEXT NOT NULL,
-            date TEXT NOT NULL,
-            shares INTEGER,
-            price REAL,
-            insider TEXT,
-            position TEXT,
-            accession TEXT NOT NULL,
-            filing_date TEXT NOT NULL,
-            headline TEXT,
-            url TEXT,
-            source TEXT NOT NULL DEFAULT 'SEC-4',
-            created_at TEXT NOT NULL,
-            UNIQUE(accession, date, insider, shares, price)
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS us_insider_scan_log (
-            accession TEXT PRIMARY KEY,
-            ticker TEXT NOT NULL,
-            scanned_at TEXT NOT NULL,
-            matched INTEGER NOT NULL DEFAULT 0
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS us_insider_meta (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    """)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_us_ins_ticker ON us_insider_purchases(yf_symbol)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_us_ins_date ON us_insider_purchases(date)")
-    conn.commit()
-    return conn
+    from data.db import connect_db
+
+    return connect_db(db_path, schema_key="us_insider", ddl=_US_INSIDER_DDL)
 
 
 def _meta_set(pairs: dict, db_path: str = DEFAULT_UNIVERSE_DB):
@@ -302,17 +306,33 @@ def _upsert_purchases(
     return inserted
 
 
-def load_us_insider_events(db_path: str = DEFAULT_UNIVERSE_DB) -> list[dict]:
+def load_us_insider_events(
+    db_path: str = DEFAULT_UNIVERSE_DB,
+    *,
+    yf_symbol: str | None = None,
+) -> list[dict]:
     try:
         conn = _conn(db_path)
-        rows = conn.execute(
-            """
-            SELECT ticker, yf_symbol, date, shares, price, insider, position,
-                   accession, filing_date, headline, url, source
-            FROM us_insider_purchases
-            ORDER BY date DESC
-            """
-        ).fetchall()
+        if yf_symbol:
+            rows = conn.execute(
+                """
+                SELECT ticker, yf_symbol, date, shares, price, insider, position,
+                       accession, filing_date, headline, url, source
+                FROM us_insider_purchases
+                WHERE yf_symbol = ?
+                ORDER BY date DESC
+                """,
+                (yf_symbol.upper(),),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT ticker, yf_symbol, date, shares, price, insider, position,
+                       accession, filing_date, headline, url, source
+                FROM us_insider_purchases
+                ORDER BY date DESC
+                """
+            ).fetchall()
         conn.close()
     except Exception as e:
         logger.warning("US insider load failed: %s", e)

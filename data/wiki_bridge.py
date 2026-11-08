@@ -230,6 +230,10 @@ def enrich_stock_opportunity(
     stock: dict,
     peers: list[dict] | None = None,
     peer_vals: dict | None = None,
+    *,
+    weights: dict | None = None,
+    vault_root_path: Path | None = None,
+    existing_memo_syms: set[str] | None = None,
 ) -> dict:
     """
     Add quant, vault qual metadata, and dashboard Score fields.
@@ -239,7 +243,7 @@ def enrich_stock_opportunity(
     but no longer scales the Score.
     """
     row = dict(stock)
-    quant = compute_quant_score(row, peers=peers or [], peer_vals=peer_vals)
+    quant = compute_quant_score(row, peers=peers or [], weights=weights, peer_vals=peer_vals)
     row.update(quant)
 
     entry = lookup_company(row.get("ticker", ""), row.get("name", ""))
@@ -252,18 +256,42 @@ def enrich_stock_opportunity(
     try:
         from data.vault_memo import attach_memo_status
 
-        attach_memo_status(row)
+        attach_memo_status(
+            row,
+            vault=vault_root_path,
+            existing_syms=existing_memo_syms,
+        )
     except Exception:
         pass
     return row
 
 
 def enrich_stocks_with_opportunities(stocks: list[dict]) -> list[dict]:
+    from scoring.quant_score import _load_weights
+
     load_registry()
     peer_vals = build_peer_value_lists(stocks)
+    weights = _load_weights()
+    vault_root_path = None
+    existing_memo_syms = None
+    try:
+        from data.vault_memo import list_existing_memo_syms
+
+        vault_root_path, existing_memo_syms = list_existing_memo_syms()
+    except Exception:
+        pass
     enriched = []
     for s in stocks:
-        enriched.append(enrich_stock_opportunity(s, peers=stocks, peer_vals=peer_vals))
+        enriched.append(
+            enrich_stock_opportunity(
+                s,
+                peers=stocks,
+                peer_vals=peer_vals,
+                weights=weights,
+                vault_root_path=vault_root_path,
+                existing_memo_syms=existing_memo_syms,
+            )
+        )
     enriched.sort(key=lambda x: x.get("composite_score") or 0, reverse=True)
     for i, row in enumerate(enriched, 1):
         row["opportunity_rank"] = i

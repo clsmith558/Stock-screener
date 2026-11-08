@@ -68,105 +68,68 @@ _DATE_IN_TEXT = re.compile(
     re.I,
 )
 
-_identity_set = False
+from data.db import connect_db
+from data.sec_pilot_common import (
+    ensure_sec_identity as _ensure_identity,
+    load_mining_universe as _shared_load_mining_universe,
+    norm_cik as _norm_cik,
+    resolve_edgar_company as _resolve_company,
+)
 
-
-def _ensure_identity() -> None:
-    global _identity_set
-    if _identity_set:
-        return
-    try:
-        from edgar import set_identity
-
-        identity = sec_edgar_identity()
-        if not identity:
-            logger.warning(
-                "SEC_EDGAR_IDENTITY / SCREENER_CONTACT_EMAIL not set — EDGAR may fail"
-            )
-            return
-        set_identity(identity)
-        _identity_set = True
-    except Exception as e:
-        logger.warning("SEC identity setup failed: %s", e)
+_REORG_DDL = (
+    """
+    CREATE TABLE IF NOT EXISTS mining_item103_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticker TEXT,
+        cik TEXT NOT NULL,
+        accession TEXT NOT NULL,
+        filing_date TEXT,
+        period_of_report TEXT,
+        items TEXT,
+        event_class TEXT,
+        snippet TEXT,
+        filing_url TEXT,
+        company_name TEXT,
+        fetched_at TEXT,
+        UNIQUE(cik, accession)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS mining_reorg_summary (
+        ticker TEXT PRIMARY KEY,
+        cik TEXT,
+        company_name TEXT,
+        has_item_103 INTEGER,
+        has_filing INTEGER,
+        has_confirmation INTEGER,
+        has_emergence INTEGER,
+        has_liquidation INTEGER,
+        first_filing_date TEXT,
+        confirmation_date TEXT,
+        emerge_date TEXT,
+        last_event_date TEXT,
+        event_count INTEGER,
+        survivor_candidate INTEGER,
+        manual_reorg INTEGER,
+        manual_note TEXT,
+        commodities_json TEXT,
+        events_json TEXT,
+        last_scanned TEXT,
+        scan_error TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_item103_ticker ON mining_item103_events(ticker)",
+    "CREATE INDEX IF NOT EXISTS idx_item103_cik ON mining_item103_events(cik)",
+)
 
 
 def _conn(db_path: str = DEFAULT_DB) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS mining_item103_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ticker TEXT,
-            cik TEXT NOT NULL,
-            accession TEXT NOT NULL,
-            filing_date TEXT,
-            period_of_report TEXT,
-            items TEXT,
-            event_class TEXT,
-            snippet TEXT,
-            filing_url TEXT,
-            company_name TEXT,
-            fetched_at TEXT,
-            UNIQUE(cik, accession)
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS mining_reorg_summary (
-            ticker TEXT PRIMARY KEY,
-            cik TEXT,
-            company_name TEXT,
-            has_item_103 INTEGER,
-            has_filing INTEGER,
-            has_confirmation INTEGER,
-            has_emergence INTEGER,
-            has_liquidation INTEGER,
-            first_filing_date TEXT,
-            confirmation_date TEXT,
-            emerge_date TEXT,
-            last_event_date TEXT,
-            event_count INTEGER,
-            survivor_candidate INTEGER,
-            manual_reorg INTEGER,
-            manual_note TEXT,
-            commodities_json TEXT,
-            events_json TEXT,
-            last_scanned TEXT,
-            scan_error TEXT
-        )
-        """
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_item103_ticker ON mining_item103_events(ticker)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_item103_cik ON mining_item103_events(cik)"
-    )
-    conn.commit()
-    return conn
+    return connect_db(db_path, schema_key="mining_reorg", ddl=_REORG_DDL)
 
 
 def load_mining_universe(force: bool = False) -> dict:
     """Load pilot universe YAML."""
-    defaults: dict[str, Any] = {
-        "companies": [],
-        "scan_years": 20,
-        "fetch_sleep_seconds": EDGAR_FETCH_SLEEP_DEFAULT,
-        "description": "",
-    }
-    if not UNIVERSE_PATH.exists():
-        return defaults
-    try:
-        with open(UNIVERSE_PATH, encoding="utf-8") as f:
-            raw = yaml.safe_load(f) or {}
-        for k, v in defaults.items():
-            if k not in raw:
-                raw[k] = v
-        return raw
-    except Exception as e:
-        logger.warning("Failed to load mining universe: %s", e)
-        return defaults
+    return _shared_load_mining_universe(force=force, universe_path=UNIVERSE_PATH)
 
 
 def universe_tickers() -> list[str]:
@@ -227,33 +190,6 @@ def _extract_snippet(text: str, max_len: int = 480) -> str:
     chunk = (m.group(0) if m else text)[: max_len * 3]
     chunk = re.sub(r"\s+", " ", chunk).strip()
     return chunk[:max_len]
-
-
-def _norm_cik(cik: Any) -> str:
-    if cik is None:
-        return ""
-    s = re.sub(r"\D", "", str(cik))
-    return s.lstrip("0") or "0"
-
-
-def _resolve_company(entry: dict):
-    """Return edgartools Company from ticker and/or CIK."""
-    from edgar import Company
-
-    cik = entry.get("cik")
-    ticker = (entry.get("ticker") or "").strip().upper()
-    last_err = None
-    if cik is not None and str(cik).strip():
-        try:
-            return Company(int(str(cik).strip()))
-        except Exception as e:
-            last_err = e
-    if ticker:
-        try:
-            return Company(ticker)
-        except Exception as e:
-            last_err = e
-    raise last_err or RuntimeError(f"Cannot resolve company for {entry}")
 
 
 def _filing_has_item_103(items: str) -> bool:
@@ -779,11 +715,30 @@ def attach_reorg_to_stock(stock: dict, summary: dict | None = None, ticker: str 
 
 def enrich_stocks_reorg_cached(stocks: list) -> list:
     """Attach cached reorg summaries (no SEC calls)."""
+    if not stocks:
+        return stocks
+    try:
+        by_ticker = {
+            (s.get("ticker") or "").strip().upper(): s
+            for s in list_reorg_summaries()
+            if s.get("ticker")
+        }
+    except Exception as e:
+        logger.warning("enrich_stocks_reorg_cached batch load failed: %s", e)
+        by_ticker = {}
     for stock in stocks:
         sym = (stock.get("ticker") or "").strip().upper()
         if not sym:
             continue
-        attach_reorg_to_stock(stock, ticker=sym)
+        summary = by_ticker.get(sym.replace(".AX", ""))
+        if summary:
+            attach_reorg_to_stock(stock, summary=summary, ticker=sym)
+        else:
+            stock["reorg"] = {
+                "scanned": False,
+                "has_item_103": False,
+                "survivor_candidate": False,
+            }
     return stocks
 
 

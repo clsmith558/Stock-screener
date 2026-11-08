@@ -98,6 +98,7 @@ def calc_own_history_cheapness(
     p_fcf: float = 0,
     fcf_yield: float = 0,
     years: int = 5,
+    hist=None,
 ) -> dict:
     """
     Compare current valuation to the stock's *own* ~5y weekly price history.
@@ -119,7 +120,7 @@ def calc_own_history_cheapness(
         "own_hist_cheap": False,
         "own_hist_label": "unknown",
     }
-    if yt is None:
+    if yt is None and hist is None:
         return empty
     price = safe_float(price)
     pb = safe_float(pb)
@@ -128,8 +129,9 @@ def calc_own_history_cheapness(
     if price <= 0:
         return empty
     try:
-        period = "5y" if years >= 5 else "2y"
-        hist = yt.history(period=period, interval="1wk", auto_adjust=True)
+        if hist is None:
+            period = "5y" if years >= 5 else "2y"
+            hist = yt.history(period=period, interval="1wk", auto_adjust=True)
         if hist is None or hist.empty or "Close" not in hist.columns:
             return empty
         closes = hist["Close"].dropna()
@@ -203,7 +205,7 @@ def calc_own_history_cheapness(
         return empty
 
 
-def calc_last_52w_low_metrics(yt, trading_days: int = 252) -> dict:
+def calc_last_52w_low_metrics(yt, trading_days: int = 252, *, hist=None) -> dict:
     """
     Most recent date the trailing ~52-week low was printed (daily Low).
 
@@ -216,10 +218,11 @@ def calc_last_52w_low_metrics(yt, trading_days: int = 252) -> dict:
       days_since_52w_low: calendar days from that date to today, or None
     """
     out = {"last_52w_low_date": None, "days_since_52w_low": None}
-    if yt is None:
+    if yt is None and hist is None:
         return out
     try:
-        hist = yt.history(period="1y", interval="1d", auto_adjust=True)
+        if hist is None:
+            hist = yt.history(period="1y", interval="1d", auto_adjust=True)
         if hist is None or hist.empty:
             return out
         col = "Low" if "Low" in hist.columns else "Close"
@@ -348,11 +351,14 @@ def business_summary(info: dict) -> str:
     return (info.get("longBusinessSummary") or info.get("description") or "").strip()
 
 
-def build_price_trend(yt, period: str = "2y", interval: str = "1wk") -> list:
+def build_price_trend(yt, period: str = "2y", interval: str = "1wk", *, hist=None) -> list:
     """Weekly/daily closes for interactive price chart in detail modal."""
     price_trend = []
     try:
-        hist = yt.history(period=period, interval=interval, auto_adjust=True)
+        if hist is None:
+            hist = yt.history(period=period, interval=interval, auto_adjust=True)
+        elif period == "2y" and interval == "1wk" and len(hist) > 105:
+            hist = hist.tail(105)
         if hist is not None and not hist.empty:
             for dt, row in hist.iterrows():
                 c = row.get("Close") or row.get("Adj Close")
@@ -403,11 +409,12 @@ def wilder_rsi(closes: list[float], period: int = RSI_PERIOD) -> list[float | No
     return out
 
 
-def calc_rsi_metrics(yt, period: int = RSI_PERIOD, with_series: bool = False) -> dict:
+def calc_rsi_metrics(yt, period: int = RSI_PERIOD, with_series: bool = False, *, hist=None) -> dict:
     """14-day RSI from ~2y daily auto-adjusted closes."""
     out: dict[str, Any] = {"rsi": None, "rsi_period": period}
     try:
-        hist = yt.history(period="2y", interval="1d", auto_adjust=True)
+        if hist is None:
+            hist = yt.history(period="2y", interval="1d", auto_adjust=True)
         if hist is None or hist.empty:
             return out
         dates: list[str] = []
@@ -460,8 +467,11 @@ def resolve_currencies(info: dict | None = None, ticker: str = "") -> tuple[str,
             (".AX", "AUD"), (".T", "JPY"), (".HK", "HKD"), (".L", "GBP"),
             (".TO", "CAD"), (".V", "CAD"), (".NS", "INR"), (".BO", "INR"),
             (".SW", "CHF"), (".PA", "EUR"), (".DE", "EUR"), (".MI", "EUR"),
-            (".KS", "KRW"), (".KQ", "KRW"), (".SI", "SGD"), (".NZ", "NZD"),
-            (".SA", "BRL"), (".MX", "MXN"), (".TW", "TWD"),
+            (".HE", "EUR"), (".AT", "EUR"), (".KS", "KRW"), (".KQ", "KRW"),
+            (".SI", "SGD"), (".NZ", "NZD"), (".SA", "BRL"), (".MX", "MXN"),
+            (".TW", "TWD"), (".JK", "IDR"), (".SS", "CNY"), (".SZ", "CNY"),
+            (".KL", "MYR"), (".BK", "THB"), (".VN", "VND"), (".IS", "TRY"),
+            (".OL", "NOK"), (".IC", "ISK"), (".TA", "ILS"),
         ):
             if sym.endswith(sfx):
                 quote = cur
@@ -572,11 +582,20 @@ def align_financial_amount(amount: float, info: dict | None = None, ticker: str 
     return safe_float(amount) * safe_float(fx.get("fx_to_quote"), 1.0)
 
 
-def calc_p_fcf(info: dict, price: float, ticker: str = "") -> float:
+def calc_p_fcf(
+    info: dict,
+    price: float,
+    ticker: str = "",
+    *,
+    fx_to_quote: float | None = None,
+) -> float:
     """Price / free-cash-flow per share; FCF converted to quote currency when needed."""
     info = info or {}
     try:
-        fcf = align_financial_amount(info.get("freeCashflow"), info, ticker)
+        if fx_to_quote is not None:
+            fcf = safe_float(info.get("freeCashflow")) * safe_float(fx_to_quote, 1.0)
+        else:
+            fcf = align_financial_amount(info.get("freeCashflow"), info, ticker)
         shares = safe_float(info.get("sharesOutstanding")) or safe_float(
             info.get("impliedSharesOutstanding")
         )
@@ -772,3 +791,542 @@ def normalize_growth_rate(val) -> float | None:
 def quote_price(info: dict) -> float:
     info = info or {}
     return safe_float(info.get("currentPrice")) or safe_float(info.get("regularMarketPrice"))
+
+
+# ---------------------- SHARED LIVE YFINANCE SNAPSHOT & DETAIL OVERLAYS (2A) ----------------------
+
+
+def fetch_yf_ticker_snapshot(
+    yf_symbol: str,
+    *,
+    ticker_for_fx: str | None = None,
+    include_detail: bool = False,
+) -> dict[str, Any]:
+    """
+    Fetch one ticker's live yfinance quote + history + derived metrics in a single pass.
+
+    Used by both sequential cache builders (`include_detail=False`) and single-stock detail
+    endpoints (`include_detail=True`, which adds `summary`, `price_trend`, `rsi_trend`,
+    and `earnings_history`).
+    """
+    import yfinance as yf
+    from data.asx import (
+        _build_earnings_history,
+        _calc_last_52w_low,
+        _calc_ma200w_gap,
+        _metrics_from_yf_info,
+        infer_currency,
+    )
+
+    sym = (yf_symbol or "").strip().upper()
+    fx_sym = (ticker_for_fx or sym).strip().upper()
+    yt = yf.Ticker(sym)
+    info = yt.info or {}
+    price = quote_price(info)
+
+    if price <= 0 and not include_detail:
+        return {
+            "yt": yt,
+            "info": info,
+            "price": 0.0,
+            "low_52w": 0.0,
+            "high_52w": 0.0,
+            "pct_from_52w_low": 0.0,
+            "p_fcf": 0.0,
+            "ma_200w": 0.0,
+            "pct_from_200w_ma": 0.0,
+            "metrics": {},
+        }
+
+    raw_low = safe_float(info.get("fiftyTwoWeekLow"))
+    raw_high = safe_float(info.get("fiftyTwoWeekHigh"))
+    low, high = reconcile_52w_range(price, raw_low, raw_high)
+    pct_52w = pct_from_52w_low(price, low)
+    p_fcf = calc_p_fcf(info, price, ticker=fx_sym)
+
+    try:
+        hist_1wk = yt.history(period="5y", interval="1wk", auto_adjust=True)
+    except Exception:
+        hist_1wk = None
+    try:
+        hist_1d = yt.history(period="2y", interval="1d", auto_adjust=True)
+    except Exception:
+        hist_1d = None
+
+    ma_200w, pct_from_200w_ma = _calc_ma200w_gap(yt, price, hist=hist_1wk)
+    low52 = _calc_last_52w_low(yt, hist=hist_1d)
+    metrics = _metrics_from_yf_info(info, price, ma_200w, pct_from_200w_ma, p_fcf, ticker=fx_sym)
+    metrics["last_52w_low_date"] = low52.get("last_52w_low_date")
+    metrics["days_since_52w_low"] = low52.get("days_since_52w_low")
+    p_fcf = metrics.get("p_fcf") or p_fcf
+    metrics.update(
+        calc_own_history_cheapness(
+            yt,
+            price=price,
+            pb=metrics.get("pb") or 0,
+            p_fcf=p_fcf or 0,
+            fcf_yield=metrics.get("fcf_yield") or 0,
+            hist=hist_1wk,
+        )
+    )
+    rsi_pack = calc_rsi_metrics(yt, with_series=include_detail, hist=hist_1d)
+    metrics["rsi"] = rsi_pack.get("rsi")
+    metrics["rsi_period"] = rsi_pack.get("rsi_period")
+
+    snap: dict[str, Any] = {
+        "yt": yt,
+        "info": info,
+        "price": safe_round(price, 2) if price else 0,
+        "low_52w": safe_round(low if include_detail else raw_low, 2) if (low if include_detail else raw_low) else 0,
+        "high_52w": safe_round(high if include_detail else raw_high, 2) if (high if include_detail else raw_high) else 0,
+        "pct_from_52w_low": pct_52w,
+        "ma_200w": ma_200w,
+        "pct_from_200w_ma": pct_from_200w_ma,
+        "p_fcf": p_fcf,
+        "name": info.get("shortName") or info.get("longName") or fx_sym,
+        "sector": info.get("sector") or "Unknown",
+        "industry": info.get("industry") or info.get("industryDisp") or metrics.get("industry") or "",
+        "currency": metrics.get("currency") or infer_currency(info, sym),
+        "metrics": metrics,
+    }
+    if include_detail:
+        snap["summary"] = business_summary(info)
+        snap["price_trend"] = build_price_trend(yt, period="2y", interval="1wk", hist=hist_1wk)
+        snap["rsi_trend"] = rsi_pack.get("rsi_trend") or []
+        snap["earnings_history"] = _build_earnings_history(yt)
+    return snap
+
+
+def attach_sec_and_mining_detail(
+    stock: dict,
+    ticker: str,
+    *,
+    include_edgar: bool = True,
+    include_sec_mining: bool = True,
+    include_asx_mining: bool = False,
+) -> dict:
+    """
+    Attach EDGAR fundamentals, bankruptcy/reorg, mining reserves, mining unit costs,
+    optional ASX mining summary, and multi-year earnings multiples onto a single-stock detail dict.
+    """
+    sym = (ticker or stock.get("ticker") or "").strip().upper()
+    if include_edgar and sym:
+        try:
+            from data.edgar_metrics import attach_edgar_to_stock, fetch_edgar_metrics, is_us_edgar_eligible
+
+            if is_us_edgar_eligible(sym):
+                stock["_edgar_eligible"] = True
+                edgar = fetch_edgar_metrics(sym)
+                attach_edgar_to_stock(stock, edgar=edgar, ticker=sym)
+            else:
+                stock["_edgar_eligible"] = False
+        except Exception as ex:
+            logger.warning("EDGAR detail fetch failed for %s: %s", sym, ex)
+
+    if include_sec_mining and sym:
+        try:
+            from data.bankruptcy_reorg import attach_reorg_to_stock
+
+            attach_reorg_to_stock(stock, ticker=sym)
+        except Exception as ex:
+            logger.debug("Reorg attach skipped for %s: %s", sym, ex)
+        try:
+            from data.mining_reserves import attach_reserves_to_stock
+
+            attach_reserves_to_stock(stock, ticker=sym)
+        except Exception as ex:
+            logger.debug("Reserves attach skipped for %s: %s", sym, ex)
+        try:
+            from data.mining_costs import attach_costs_to_stock
+
+            attach_costs_to_stock(stock, ticker=sym)
+        except Exception as ex:
+            logger.debug("Unit-cost attach skipped for %s: %s", sym, ex)
+
+    if include_asx_mining and sym:
+        try:
+            from data.asx_mining import attach_asx_mining_to_stock, get_asx_mining_summary
+
+            if get_asx_mining_summary(sym, max_age_days=0):
+                attach_asx_mining_to_stock(stock, ticker=sym)
+        except Exception as ex:
+            logger.debug("ASX mining attach skipped for %s: %s", sym, ex)
+
+    try:
+        from data.earnings_multiples import attach_earnings_multiples
+
+        attach_earnings_multiples(stock)
+    except Exception as ex:
+        logger.debug("earnings multiples skipped for %s: %s", sym, ex)
+
+    return stock
+
+
+# ---------------------- SHARED YF CACHE / INACTIVE / SEQUENTIAL FETCH PLUMBING (2B) ----------------------
+
+TENTATIVE_INACTIVE_REASONS = frozenset({"cached_zero_price"})
+
+
+def is_yf_fresh(last_updated: str, max_days: int = 30) -> bool:
+    if not last_updated:
+        return False
+    try:
+        from datetime import datetime
+
+        dt = datetime.fromisoformat(last_updated)
+        return (datetime.now() - dt).days < max_days
+    except Exception:
+        return False
+
+
+def detect_yf_inactive(info: dict, price: float) -> str:
+    """
+    Return a reason string if Yahoo data indicates this ticker is inactive/delisted.
+    Uses .info only — never calls history (avoids duplicate 404 log spam).
+    """
+    info = info or {}
+    price = safe_float(price)
+    if price > 0:
+        return ""
+
+    has_name = bool(info.get("shortName") or info.get("longName"))
+    has_symbol = bool(info.get("symbol") or info.get("underlyingSymbol"))
+    rm = safe_float(info.get("regularMarketPrice"), None)
+    cp = safe_float(info.get("currentPrice"), None)
+    if (rm and rm > 0) or (cp and cp > 0):
+        return ""
+
+    if not info or len(info) <= 3:
+        return "quote_not_found"
+    if not has_name and not has_symbol:
+        return "quote_not_found"
+    return "zero_price"
+
+
+def inactive_from_yf_error(msg: str) -> str:
+    """Map yfinance exception text to inactive reason, or '' if likely transient."""
+    m = (msg or "").lower()
+    if any(x in m for x in ("rate", "too many", "429", "timed out", "timeout", "connection", "__round__")):
+        return ""
+    if any(
+        x in m
+        for x in (
+            "404",
+            "not found",
+            "no data",
+            "delisted",
+            "invalid",
+            "possibly delisted",
+            "quote not found",
+        )
+    ):
+        return "quote_not_found"
+    return ""
+
+
+def load_inactive_set_generic(
+    conn_fn,
+    table: str,
+    key_col: str,
+    *,
+    db_path: str,
+    confirmed_only: bool = False,
+) -> set[str]:
+    try:
+        conn = conn_fn(db_path)
+        if confirmed_only:
+            ph = ",".join("?" for _ in TENTATIVE_INACTIVE_REASONS)
+            cur = conn.execute(
+                f"SELECT {key_col} FROM {table} WHERE reason NOT IN ({ph})",
+                tuple(TENTATIVE_INACTIVE_REASONS),
+            )
+        else:
+            cur = conn.execute(f"SELECT {key_col} FROM {table}")
+        out = {row[0] for row in cur.fetchall()}
+        conn.close()
+        return out
+    except Exception as e:
+        logger.warning("load_inactive_set_generic(%s) failed: %s", table, e)
+        return set()
+
+
+def mark_inactive_generic(
+    conn_fn,
+    table: str,
+    key_col: str,
+    key_val: str,
+    reason: str,
+    *,
+    source: str = "yf_fetch",
+    db_path: str,
+) -> None:
+    if not key_val:
+        return
+    try:
+        from datetime import datetime
+
+        conn = conn_fn(db_path)
+        conn.execute(
+            f"INSERT OR REPLACE INTO {table} ({key_col}, reason, marked_at, source) VALUES (?,?,?,?)",
+            (key_val, reason or "unknown", datetime.now().isoformat(), source),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning("mark_inactive_generic(%s, %s) failed: %s", table, key_val, e)
+
+
+def remove_inactive_generic(
+    conn_fn,
+    table: str,
+    key_col: str,
+    key_val: str,
+    *,
+    db_path: str,
+) -> None:
+    if not key_val:
+        return
+    try:
+        conn = conn_fn(db_path)
+        conn.execute(f"DELETE FROM {table} WHERE {key_col}=?", (key_val,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning("remove_inactive_generic(%s, %s) failed: %s", table, key_val, e)
+
+
+def sync_inactive_from_cache_generic(
+    conn_fn,
+    cache_table: str,
+    inactive_table: str,
+    key_col: str,
+    mark_fn,
+    *,
+    db_path: str,
+) -> int:
+    try:
+        conn = conn_fn(db_path)
+        cur = conn.execute(
+            f"""
+            SELECT c.{key_col} FROM {cache_table} c
+            LEFT JOIN {inactive_table} i ON c.{key_col} = i.{key_col}
+            WHERE (c.price IS NULL OR c.price <= 0) AND i.{key_col} IS NULL
+            """
+        )
+        to_mark = [row[0] for row in cur.fetchall()]
+        conn.close()
+        for k in to_mark:
+            mark_fn(k, "cached_zero_price", source="cache_scan", db_path=db_path)
+        if to_mark:
+            logger.info("Added %d zero-price rows from %s to %s", len(to_mark), cache_table, inactive_table)
+        return len(to_mark)
+    except Exception as e:
+        logger.warning("sync_inactive_from_cache_generic(%s) failed: %s", cache_table, e)
+        return 0
+
+
+def load_yf_cache_generic(
+    conn_fn,
+    cache_table: str,
+    key_col: str,
+    keys: list[str],
+    *,
+    max_days: int = 30,
+    db_path: str,
+) -> dict[str, dict]:
+    if not keys:
+        return {}
+    import json
+
+    conn = conn_fn(db_path)
+    ph = ",".join("?" for _ in keys)
+    cur = conn.execute(
+        f"""SELECT {key_col}, last_updated, price, low_52w, high_52w, name, sector, metrics_json, p_fcf
+            FROM {cache_table} WHERE {key_col} IN ({ph})""",
+        keys,
+    )
+    out: dict[str, dict] = {}
+    for row in cur.fetchall():
+        k, last_up, price, low, high, name, sector, mjson, pf = row
+        if is_yf_fresh(last_up, max_days):
+            try:
+                metrics = json.loads(mjson) if mjson else {}
+            except Exception:
+                metrics = {}
+            out[k] = {
+                "price": price or 0,
+                "low_52w": low or 0,
+                "high_52w": high or 0,
+                "name": name or k,
+                "sector": sector or "Unknown",
+                "metrics": metrics,
+                "p_fcf": pf or 0,
+            }
+    conn.close()
+    return out
+
+
+def save_yf_cache_generic(
+    conn_fn,
+    cache_table: str,
+    key_col: str,
+    key_val: str,
+    data: dict,
+    *,
+    db_path: str,
+) -> None:
+    import json
+    from datetime import datetime
+
+    conn = conn_fn(db_path)
+    metrics_json = json.dumps(data.get("metrics") or {})
+    conn.execute(
+        f"""
+        INSERT OR REPLACE INTO {cache_table}
+        ({key_col}, last_updated, price, low_52w, high_52w, name, sector, metrics_json, p_fcf)
+        VALUES (?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            key_val,
+            datetime.now().isoformat(),
+            data.get("price") or 0,
+            data.get("low_52w") or 0,
+            data.get("high_52w") or 0,
+            data.get("name") or key_val,
+            data.get("sector") or "Unknown",
+            metrics_json,
+            data.get("p_fcf") or 0,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def run_sequential_yf_fetch(
+    keys: list[str],
+    *,
+    to_yf_symbol=lambda k: k,
+    sleep_seconds: float = 2.0,
+    progress_every: int = 50,
+    retry_tentative_inactive: bool = False,
+    progress_label: str = "yf sequential",
+    on_progress=None,
+    sync_inactive_fn,
+    filter_active_fn,
+    load_inactive_fn,
+    mark_inactive_fn,
+    remove_inactive_fn,
+    save_cache_fn,
+) -> dict[str, dict]:
+    """
+    Shared sequential, rate-limited yfinance fetcher used by both `data/asx.py`
+    and `data/business_lists.py`.
+    """
+    sync_inactive_fn()
+    keys = filter_active_fn(keys, confirmed_only=retry_tentative_inactive)
+    inactive_skip = load_inactive_fn(confirmed_only=retry_tentative_inactive)
+    out: dict[str, dict] = {}
+    total = len(keys)
+    if not total:
+        logger.info("%s: no active symbols to fetch.", progress_label)
+        return out
+
+    if progress_every is None or progress_every < 1:
+        progress_every = 10
+    progress_every = min(progress_every, 25)
+    est_min = (total * float(sleep_seconds)) / 60.0
+    logger.info(
+        "%s: starting %d tickers (sleep=%.1fs, ~%.0f min)",
+        progress_label,
+        total,
+        sleep_seconds,
+        est_min,
+    )
+    t0 = time.monotonic()
+    done_ok = 0
+
+    for i, k in enumerate(keys):
+        n = i + 1
+        if k in inactive_skip:
+            if n == 1 or n % progress_every == 0 or n == total:
+                logger.info("  %s progress: %d/%d (ok=%d) skip-inactive %s", progress_label, n, total, done_ok, k)
+            continue
+
+        if n == 1 or n % progress_every == 0 or n == total:
+            elapsed = time.monotonic() - t0
+            rate = done_ok / elapsed if elapsed > 1 else 0
+            remain = total - n
+            eta_min = (remain / rate / 60.0) if rate > 0 else (remain * sleep_seconds / 60.0)
+            logger.info(
+                "  %s progress: %d/%d (%.0f%%) ok=%d elapsed=%.0fs eta~%.0fmin now=%s",
+                progress_label,
+                n,
+                total,
+                100.0 * n / total,
+                done_ok,
+                elapsed,
+                eta_min,
+                k,
+            )
+            if on_progress:
+                try:
+                    on_progress(n, total)
+                except Exception as ex:
+                    logger.warning("on_progress callback failed: %s", ex)
+
+        yf_sym = to_yf_symbol(k)
+        try:
+            snap = fetch_yf_ticker_snapshot(yf_sym, ticker_for_fx=k, include_detail=False)
+            price = snap["price"]
+            info = snap["info"]
+            if price <= 0:
+                reason = detect_yf_inactive(info, price) or "quote_not_found"
+                mark_inactive_fn(k, reason, source="yf_fetch")
+                inactive_skip.add(k)
+                logger.info("  %s: inactive (%s) — added to skip list", k, reason)
+                time.sleep(sleep_seconds)
+                continue
+
+            data = {
+                "price": snap["price"],
+                "low_52w": snap["low_52w"],
+                "high_52w": snap["high_52w"],
+                "name": snap["name"] or k,
+                "sector": snap["sector"],
+                "industry": snap["industry"],
+                "metrics": snap["metrics"],
+                "p_fcf": snap["p_fcf"],
+            }
+            out[k] = data
+            save_cache_fn(k, data)
+            remove_inactive_fn(k)
+            inactive_skip.discard(k)
+            done_ok += 1
+            time.sleep(sleep_seconds)
+        except Exception as e:
+            msg = str(e)
+            logger.warning("  %s error for %s: %s", progress_label, k, msg[:120])
+            inactive_reason = inactive_from_yf_error(msg)
+            if inactive_reason:
+                mark_inactive_fn(k, inactive_reason, source="yf_error")
+                inactive_skip.add(k)
+                logger.info("  %s: inactive (%s) from yf error", k, inactive_reason)
+            else:
+                logger.info("  %s: transient error, will retry later", k)
+            sleep = 30 if ("Rate" in msg or "Too Many" in msg or "429" in msg) else max(1.0, sleep_seconds / 2)
+            time.sleep(sleep)
+
+    logger.info(
+        "%s complete: saved %d / %d in %.0fs",
+        progress_label,
+        len(out),
+        total,
+        time.monotonic() - t0,
+    )
+    if on_progress:
+        try:
+            on_progress(total, total)
+        except Exception as ex:
+            logger.warning("on_progress callback failed: %s", ex)
+    return out
+

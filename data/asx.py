@@ -107,8 +107,11 @@ def _build_earnings_history(yt) -> list:
 _SUFFIX_CURRENCY = {
     ".AX": "AUD", ".T": "JPY", ".HK": "HKD", ".L": "GBP", ".TO": "CAD",
     ".V": "CAD", ".NS": "INR", ".BO": "INR", ".SW": "CHF", ".PA": "EUR",
-    ".DE": "EUR", ".MI": "EUR", ".KS": "KRW", ".KQ": "KRW", ".SI": "SGD",
-    ".NZ": "NZD", ".SA": "BRL", ".MX": "MXN", ".TW": "TWD",
+    ".DE": "EUR", ".MI": "EUR", ".HE": "EUR", ".AT": "EUR", ".KS": "KRW",
+    ".KQ": "KRW", ".SI": "SGD", ".NZ": "NZD", ".SA": "BRL", ".MX": "MXN",
+    ".TW": "TWD", ".JK": "IDR", ".SS": "CNY", ".SZ": "CNY", ".KL": "MYR",
+    ".BK": "THB", ".VN": "VND", ".IS": "TRY", ".OL": "NOK", ".IC": "ISK",
+    ".TA": "ILS",
 }
 
 
@@ -258,7 +261,7 @@ def _metrics_from_yf_info(info: dict, price: float, ma_200w=0, pct_from_200w_ma=
     )
 
     # Recompute P/FCF with converted FCF when caller passed pre-conversion p_fcf
-    p_fcf_aligned = calc_p_fcf(info, price, ticker=ticker) if price else p_fcf
+    p_fcf_aligned = calc_p_fcf(info, price, ticker=ticker, fx_to_quote=fx_scale) if price else p_fcf
     if p_fcf_aligned:
         p_fcf = p_fcf_aligned
 
@@ -330,12 +333,13 @@ def _metrics_from_yf_info(info: dict, price: float, ma_200w=0, pct_from_200w_ma=
     }
 
 
-def _calc_ma200w_gap(yt, price=None):
+def _calc_ma200w_gap(yt, price=None, hist=None):
     """Compute 200-week SMA and % gap from current price. Returns (ma_200w, pct_from_200w_ma)."""
     if price is not None and _safe_float(price) <= 0:
         return 0, 0
     try:
-        hist = yt.history(period="max", interval="1wk", auto_adjust=True)
+        if hist is None:
+            hist = yt.history(period="max", interval="1wk", auto_adjust=True)
         if hist is None or hist.empty:
             return 0, 0
         closes = hist["Close"].dropna()
@@ -351,55 +355,59 @@ def _calc_ma200w_gap(yt, price=None):
     return 0, 0
 
 
-def _calc_last_52w_low(yt) -> dict:
+def _calc_last_52w_low(yt, hist=None) -> dict:
     """Most recent date of the trailing 52-week low (daily). See yf_helpers.calc_last_52w_low_metrics."""
     from data.yf_helpers import calc_last_52w_low_metrics
 
-    return calc_last_52w_low_metrics(yt)
+    return calc_last_52w_low_metrics(yt, hist=hist)
 
 
 # ---------------------- UNIVERSE (CSV) MANAGEMENT ----------------------
 
+_ASX_UNIVERSE_DDL = (
+    """
+    CREATE TABLE IF NOT EXISTS asx_universe (
+        ticker TEXT PRIMARY KEY,
+        name TEXT,
+        gics TEXT,
+        as_of TEXT,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS asx_universe_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS asx_yf_cache (
+        ticker TEXT PRIMARY KEY,
+        last_updated TEXT,
+        price REAL,
+        low_52w REAL,
+        high_52w REAL,
+        name TEXT,
+        sector TEXT,
+        metrics_json TEXT,
+        p_fcf REAL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS asx_inactive_tickers (
+        ticker TEXT PRIMARY KEY,
+        reason TEXT,
+        marked_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        source TEXT
+    )
+    """,
+)
+
+
 def _get_universe_conn(db_path: str = DEFAULT_UNIVERSE_DB):
-    conn = sqlite3.connect(db_path)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS asx_universe (
-            ticker TEXT PRIMARY KEY,
-            name TEXT,
-            gics TEXT,
-            as_of TEXT,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS asx_universe_meta (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS asx_yf_cache (
-            ticker TEXT PRIMARY KEY,
-            last_updated TEXT,
-            price REAL,
-            low_52w REAL,
-            high_52w REAL,
-            name TEXT,
-            sector TEXT,
-            metrics_json TEXT,
-            p_fcf REAL
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS asx_inactive_tickers (
-            ticker TEXT PRIMARY KEY,
-            reason TEXT,
-            marked_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            source TEXT
-        )
-    """)
-    conn.commit()
-    return conn
+    from data.db import connect_db
+
+    return connect_db(db_path, schema_key="asx_universe", ddl=_ASX_UNIVERSE_DDL)
 
 
 # ---------------------- INACTIVE / DELISTED TICKER SKIP LIST ----------------------
@@ -407,58 +415,50 @@ def _get_universe_conn(db_path: str = DEFAULT_UNIVERSE_DB):
 # so we never waste yfinance calls on them again.
 # "cached_zero_price" is tentative (may be a transient fetch error); confirmed reasons are permanent skips.
 
-TENTATIVE_INACTIVE_REASONS = frozenset({"cached_zero_price"})
+from data.yf_helpers import (  # noqa: E402
+    TENTATIVE_INACTIVE_REASONS,
+    detect_yf_inactive as _detect_yf_inactive,
+    inactive_from_yf_error as _inactive_from_yf_error,
+    is_yf_fresh as _is_yf_fresh_shared,
+    load_inactive_set_generic,
+    load_yf_cache_generic,
+    mark_inactive_generic,
+    remove_inactive_generic,
+    run_sequential_yf_fetch,
+    save_yf_cache_generic,
+    sync_inactive_from_cache_generic,
+)
 
 
 def load_inactive_tickers(db_path: str = DEFAULT_UNIVERSE_DB, confirmed_only: bool = False) -> set:
     """Return set of base tickers (e.g. 'ABC') on the inactive skip list."""
-    try:
-        conn = _get_universe_conn(db_path)
-        if confirmed_only:
-            placeholders = ",".join("?" for _ in TENTATIVE_INACTIVE_REASONS)
-            cur = conn.execute(
-                f"SELECT ticker FROM asx_inactive_tickers WHERE reason NOT IN ({placeholders})",
-                tuple(TENTATIVE_INACTIVE_REASONS),
-            )
-        else:
-            cur = conn.execute("SELECT ticker FROM asx_inactive_tickers")
-        out = {row[0] for row in cur.fetchall()}
-        conn.close()
-        return out
-    except Exception as e:
-        logger.warning(f"Failed loading inactive ticker list: {e}")
-        return set()
+    return load_inactive_set_generic(
+        _get_universe_conn,
+        "asx_inactive_tickers",
+        "ticker",
+        db_path=db_path,
+        confirmed_only=confirmed_only,
+    )
 
 
 def remove_inactive_ticker(ticker: str, db_path: str = DEFAULT_UNIVERSE_DB):
     """Remove a ticker from the inactive skip list (e.g. after a successful live quote)."""
     t = (ticker or "").upper().replace(".AX", "")
-    if not t:
-        return
-    try:
-        conn = _get_universe_conn(db_path)
-        conn.execute("DELETE FROM asx_inactive_tickers WHERE ticker=?", (t,))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.warning(f"Failed removing {t} from inactive list: {e}")
+    remove_inactive_generic(_get_universe_conn, "asx_inactive_tickers", "ticker", t, db_path=db_path)
 
 
 def mark_ticker_inactive(ticker: str, reason: str, source: str = "yf_fetch", db_path: str = DEFAULT_UNIVERSE_DB):
     """Add a ticker to the inactive skip list (idempotent)."""
     t = (ticker or "").upper().replace(".AX", "")
-    if not t:
-        return
-    try:
-        conn = _get_universe_conn(db_path)
-        conn.execute(
-            "INSERT OR REPLACE INTO asx_inactive_tickers (ticker, reason, marked_at, source) VALUES (?,?,?,?)",
-            (t, reason or "unknown", datetime.now().isoformat(), source)
-        )
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.warning(f"Failed marking {t} inactive: {e}")
+    mark_inactive_generic(
+        _get_universe_conn,
+        "asx_inactive_tickers",
+        "ticker",
+        t,
+        reason,
+        source=source,
+        db_path=db_path,
+    )
 
 
 def filter_active_tickers(tickers: list, db_path: str = DEFAULT_UNIVERSE_DB, confirmed_only: bool = False) -> list:
@@ -476,57 +476,14 @@ def filter_active_tickers(tickers: list, db_path: str = DEFAULT_UNIVERSE_DB, con
 
 def sync_inactive_from_cache(db_path: str = DEFAULT_UNIVERSE_DB) -> int:
     """Promote zero-price yf cache rows to the inactive skip list (one-time backfill + ongoing)."""
-    try:
-        conn = _get_universe_conn(db_path)
-        cur = conn.execute("""
-            SELECT c.ticker FROM asx_yf_cache c
-            LEFT JOIN asx_inactive_tickers i ON c.ticker = i.ticker
-            WHERE (c.price IS NULL OR c.price <= 0) AND i.ticker IS NULL
-        """)
-        to_mark = [row[0] for row in cur.fetchall()]
-        conn.close()
-        for t in to_mark:
-            mark_ticker_inactive(t, "cached_zero_price", source="cache_scan", db_path=db_path)
-        if to_mark:
-            logger.info(f"Added {len(to_mark)} zero-price cached tickers to inactive skip list")
-        return len(to_mark)
-    except Exception as e:
-        logger.warning(f"sync_inactive_from_cache failed: {e}")
-        return 0
-
-
-def _detect_yf_inactive(info: dict, price: float) -> str:
-    """
-    Return a reason string if Yahoo data indicates this ticker is inactive/delisted.
-    Uses .info only — never calls history (avoids duplicate 404 log spam).
-    """
-    info = info or {}
-    price = _safe_float(price)
-    if price > 0:
-        return ""
-
-    has_name = bool(info.get("shortName") or info.get("longName"))
-    has_symbol = bool(info.get("symbol") or info.get("underlyingSymbol"))
-    rm = _safe_float(info.get("regularMarketPrice"), None)
-    cp = _safe_float(info.get("currentPrice"), None)
-    if (rm and rm > 0) or (cp and cp > 0):
-        return ""
-
-    if not info or len(info) <= 3:
-        return "quote_not_found"
-    if not has_name and not has_symbol:
-        return "quote_not_found"
-    return "zero_price"
-
-
-def _inactive_from_yf_error(msg: str) -> str:
-    """Map yfinance exception text to inactive reason, or '' if likely transient."""
-    m = (msg or "").lower()
-    if any(x in m for x in ("rate", "too many", "429", "timed out", "timeout", "connection", "__round__")):
-        return ""
-    if any(x in m for x in ("404", "not found", "no data", "delisted", "invalid", "possibly delisted", "quote not found")):
-        return "quote_not_found"
-    return ""
+    return sync_inactive_from_cache_generic(
+        _get_universe_conn,
+        "asx_yf_cache",
+        "asx_inactive_tickers",
+        "ticker",
+        mark_ticker_inactive,
+        db_path=db_path,
+    )
 
 
 def _set_meta(conn, key: str, value: str):
@@ -722,73 +679,35 @@ def get_asx_meta() -> dict:
 # fetch is acceptable (hours) because it only happens ~monthly.
 
 def _is_yf_fresh(last_updated: str, max_days: int = None) -> bool:
-    if not last_updated:
-        return False
     if max_days is None:
         max_days = YF_CACHE_MAX_AGE_DAYS
-    try:
-        dt = datetime.fromisoformat(last_updated)
-        return (datetime.now() - dt).days < max_days
-    except Exception:
-        return False
+    return _is_yf_fresh_shared(last_updated, max_days=max_days)
 
 
 def load_yf_cached_data(tickers: list, max_days: int = None) -> dict:
     """Return {base_ticker: {price, low_52w, high_52w, name, sector, metrics, p_fcf}} for fresh entries only."""
-    if not tickers:
-        return {}
     if max_days is None:
         max_days = YF_CACHE_MAX_AGE_DAYS
-    conn = _get_universe_conn()
-    placeholders = ",".join("?" for _ in tickers)
-    cur = conn.execute(
-        f"""SELECT ticker, last_updated, price, low_52w, high_52w, name, sector, metrics_json, p_fcf
-            FROM asx_yf_cache
-            WHERE ticker IN ({placeholders})""",
-        tickers
+    return load_yf_cache_generic(
+        _get_universe_conn,
+        "asx_yf_cache",
+        "ticker",
+        tickers,
+        max_days=max_days,
+        db_path=DEFAULT_UNIVERSE_DB,
     )
-    out = {}
-    for row in cur.fetchall():
-        t, last_up, price, low, high, name, sector, mjson, pf = row
-        if _is_yf_fresh(last_up, max_days):
-            try:
-                metrics = json.loads(mjson) if mjson else {}
-            except Exception:
-                metrics = {}
-            out[t] = {
-                "price": price or 0,
-                "low_52w": low or 0,
-                "high_52w": high or 0,
-                "name": name or t,
-                "sector": sector or "Unknown",
-                "metrics": metrics,
-                "p_fcf": pf or 0
-            }
-    conn.close()
-    return out
 
 
 def save_yf_data(ticker: str, data: dict):
     """Persist one ticker's yf snapshot."""
-    conn = _get_universe_conn()
-    metrics_json = json.dumps(data.get("metrics") or {})
-    conn.execute("""
-        INSERT OR REPLACE INTO asx_yf_cache
-        (ticker, last_updated, price, low_52w, high_52w, name, sector, metrics_json, p_fcf)
-        VALUES (?,?,?,?,?,?,?,?,?)
-    """, (
+    save_yf_cache_generic(
+        _get_universe_conn,
+        "asx_yf_cache",
+        "ticker",
         ticker,
-        datetime.now().isoformat(),
-        data.get("price") or 0,
-        data.get("low_52w") or 0,
-        data.get("high_52w") or 0,
-        data.get("name") or ticker,
-        data.get("sector") or "Unknown",
-        metrics_json,
-        data.get("p_fcf") or 0
-    ))
-    conn.commit()
-    conn.close()
+        data,
+        db_path=DEFAULT_UNIVERSE_DB,
+    )
 
 
 def _fetch_yf_data_sequentially(
@@ -804,118 +723,20 @@ def _fetch_yf_data_sequentially(
     """
     if sleep_seconds is None:
         sleep_seconds = YF_FETCH_SLEEP_SECONDS
-    sync_inactive_from_cache()
-    base_tickers = filter_active_tickers(
+    return run_sequential_yf_fetch(
         base_tickers,
-        confirmed_only=retry_tentative_inactive,
+        to_yf_symbol=lambda t: f"{t}.AX",
+        sleep_seconds=sleep_seconds,
+        progress_every=progress_every,
+        retry_tentative_inactive=retry_tentative_inactive,
+        progress_label="ASX yf sequential",
+        sync_inactive_fn=sync_inactive_from_cache,
+        filter_active_fn=filter_active_tickers,
+        load_inactive_fn=load_inactive_tickers,
+        mark_inactive_fn=mark_ticker_inactive,
+        remove_inactive_fn=remove_inactive_ticker,
+        save_cache_fn=save_yf_data,
     )
-    inactive_skip = load_inactive_tickers(confirmed_only=retry_tentative_inactive)
-    out = {}
-    total = len(base_tickers)
-    if total == 0:
-        logger.info("Sequential yfinance fetch: no active tickers to fetch (all inactive or empty).")
-        return out
-    if progress_every is None or progress_every < 1:
-        progress_every = 10
-    progress_every = min(progress_every, 25)
-    est_min = (total * float(sleep_seconds)) / 60.0
-    logger.info(
-        "Sequential yfinance fetch starting for %d tickers (sleep=%.1fs, ~%.0f min)",
-        total,
-        sleep_seconds,
-        est_min,
-    )
-    t0 = time.monotonic()
-    done_ok = 0
-    for i, t in enumerate(base_tickers):
-        n = i + 1
-        if t in inactive_skip:
-            continue
-        if n == 1 or n % progress_every == 0 or n == total:
-            elapsed = time.monotonic() - t0
-            rate = done_ok / elapsed if elapsed > 1 else 0
-            remain = total - n
-            eta_min = (remain / rate / 60.0) if rate > 0 else (remain * sleep_seconds / 60.0)
-            logger.info(
-                "  yf sequential progress: %d/%d (%.0f%%) ok=%d elapsed=%.0fs eta~%.0fmin now=%s",
-                n,
-                total,
-                100.0 * n / total,
-                done_ok,
-                elapsed,
-                eta_min,
-                t,
-            )
-        try:
-            yt = yf.Ticker(f"{t}.AX")
-            info = yt.info or {}
-            price = _quote_price(info)
-
-            if price <= 0:
-                reason = _detect_yf_inactive(info, price) or "quote_not_found"
-                mark_ticker_inactive(t, reason, source="yf_fetch")
-                inactive_skip.add(t)
-                logger.info(f"  {t}: inactive ({reason}) — added to skip list, no future yf calls")
-                time.sleep(sleep_seconds)
-                continue
-
-            low = _safe_float(info.get("fiftyTwoWeekLow"))
-            high = _safe_float(info.get("fiftyTwoWeekHigh"))
-            p_fcf = _calc_p_fcf(info, price, ticker=t)
-
-            ma_200w, pct_from_200w_ma = _calc_ma200w_gap(yt, price)
-            low52 = _calc_last_52w_low(yt)
-            metrics = _metrics_from_yf_info(info, price, ma_200w, pct_from_200w_ma, p_fcf, ticker=t)
-            metrics["last_52w_low_date"] = low52.get("last_52w_low_date")
-            metrics["days_since_52w_low"] = low52.get("days_since_52w_low")
-            p_fcf = metrics.get("p_fcf") or p_fcf
-            from data.yf_helpers import calc_own_history_cheapness, calc_rsi_metrics
-            own = calc_own_history_cheapness(
-                yt,
-                price=price,
-                pb=metrics.get("pb") or 0,
-                p_fcf=p_fcf or 0,
-                fcf_yield=metrics.get("fcf_yield") or 0,
-            )
-            metrics.update(own)
-            metrics.update(calc_rsi_metrics(yt, with_series=False))
-
-            data = {
-                "price": _safe_round(price, 2),
-                "low_52w": _safe_round(low, 2),
-                "high_52w": _safe_round(high, 2),
-                "name": info.get("shortName") or info.get("longName") or t,
-                "sector": info.get("sector") or "Unknown",
-                "industry": info.get("industry") or info.get("industryDisp") or metrics.get("industry") or "",
-                "metrics": metrics,
-                "p_fcf": p_fcf
-            }
-            out[t] = data
-            save_yf_data(t, data)
-            remove_inactive_ticker(t)
-            inactive_skip.discard(t)
-            done_ok += 1
-            time.sleep(sleep_seconds)
-        except Exception as e:
-            msg = str(e)
-            logger.warning(f"  yf sequential fetch error for {t}: {msg[:120]}")
-            inactive_reason = _inactive_from_yf_error(msg)
-            if inactive_reason:
-                mark_ticker_inactive(t, inactive_reason, source="yf_error")
-                inactive_skip.add(t)
-                logger.info(f"  {t}: inactive ({inactive_reason}) from yf error - added to skip list")
-            else:
-                logger.info(f"  {t}: transient error, will retry on next stale cycle (not marking inactive)")
-            # Be extra nice on rate limits / errors
-            sleep = 30 if 'Rate' in msg or 'Too Many' in msg or '429' in msg else max(1.0, sleep_seconds / 2)
-            time.sleep(sleep)
-    logger.info(
-        "Sequential yf fetch complete: saved %d / %d in %.0fs",
-        len(out),
-        total,
-        time.monotonic() - t0,
-    )
-    return out
 
 
 def rebuild_asx_yf_cache(sleep_seconds: float = None):
@@ -1234,6 +1055,8 @@ def _fetch_single_asx(base_ticker: str, use_pdf: bool = False):
     Returns a fully enriched stock dict with latest yf metrics + any signals for it.
     Much faster than full list.
     """
+    from data.yf_helpers import attach_sec_and_mining_detail, fetch_yf_ticker_snapshot
+
     t = (base_ticker or "").upper().replace(".AX", "")
     if not t:
         return None
@@ -1252,89 +1075,57 @@ def _fetch_single_asx(base_ticker: str, use_pdf: bool = False):
 
     yf_symbol = f"{t}.AX"
     try:
-        yt = yf.Ticker(yf_symbol)
-        info = yt.info or {}
-        price = _quote_price(info)
-        low, high = _reconcile_52w_range(
-            price, info.get("fiftyTwoWeekLow"), info.get("fiftyTwoWeekHigh")
-        )
-        pct = _pct_from_52w_low(price, low)
-
-        p_fcf = _calc_p_fcf(info, price, ticker=yf_symbol)
-
-        ma_200w, pct_from_200w_ma = _calc_ma200w_gap(yt, price)
-        low52 = _calc_last_52w_low(yt)
-        metrics = _metrics_from_yf_info(info, price, ma_200w, pct_from_200w_ma, p_fcf, ticker=yf_symbol)
-        metrics["last_52w_low_date"] = low52.get("last_52w_low_date")
-        metrics["days_since_52w_low"] = low52.get("days_since_52w_low")
-        p_fcf = metrics.get("p_fcf") or p_fcf
-        from data.yf_helpers import calc_own_history_cheapness, calc_rsi_metrics
-        metrics.update(
-            calc_own_history_cheapness(
-                yt,
-                price=price,
-                pb=metrics.get("pb") or 0,
-                p_fcf=p_fcf or 0,
-                fcf_yield=metrics.get("fcf_yield") or 0,
-            )
-        )
-        rsi_pack = calc_rsi_metrics(yt, with_series=True)
-        metrics["rsi"] = rsi_pack.get("rsi")
-        metrics["rsi_period"] = rsi_pack.get("rsi_period")
-        market_cap = metrics.get("market_cap", 0)
-        pe = metrics.get("pe", 0)
-        pb = metrics.get("pb", 0)
-
-        summary = _business_summary(info)
-        price_trend = _build_price_trend(yt, period="2y", interval="1wk")
-        earnings_history = _build_earnings_history(yt)
-
+        snap = fetch_yf_ticker_snapshot(yf_symbol, ticker_for_fx=yf_symbol, include_detail=True)
+        metrics = snap["metrics"]
         detail = load_asx_universe_details().get(t, {})
-        name = detail.get("name") or info.get("shortName") or info.get("longName") or t
-        gics = detail.get("gics") or info.get("sector") or "Unknown"
+        name = detail.get("name") or snap["name"] or t
+        gics = detail.get("gics") or snap["sector"] or "Unknown"
 
-        formatted = []
-        for sig in real_signals[:6]:
-            formatted.append({"date": sig.get("date"), "type": sig.get("type"), "desc": (sig.get("headline") or "")[:120]})
+        formatted = [
+            {"date": sig.get("date"), "type": sig.get("type"), "desc": (sig.get("headline") or "")[:120]}
+            for sig in real_signals[:6]
+        ]
         if not formatted:
             formatted = [{"date": datetime.now().strftime("%Y-%m-%d"), "type": "note", "desc": "No recent relevant announcements"}]
 
         stock = {
-            "ticker": f"{t}.AX",
+            "ticker": yf_symbol,
             "name": name,
             "sector": gics,
             "insider_buys_2026": insider_count,
             "buyback_announced": has_buyback,
             "buyback_date": None,
-            "pct_from_52w_low": pct,
-            "pct_from_200w_ma": pct_from_200w_ma,
+            "pct_from_52w_low": snap["pct_from_52w_low"],
+            "pct_from_200w_ma": snap["pct_from_200w_ma"],
             "last_52w_low_date": metrics.get("last_52w_low_date"),
             "days_since_52w_low": metrics.get("days_since_52w_low"),
             "last_activity": real_signals[0]["date"] if real_signals else datetime.now().strftime("%Y-%m-%d"),
-            "current_price": _safe_round(price, 2),
-            "low_52w": _safe_round(low, 2),
-            "high_52w": _safe_round(high, 2),
-            "market_cap": market_cap,
-            "currency": metrics.get("currency") or infer_currency(ticker=f"{t}.AX"),
+            "current_price": snap["price"],
+            "low_52w": snap["low_52w"],
+            "high_52w": snap["high_52w"],
+            "market_cap": metrics.get("market_cap", 0),
+            "currency": snap["currency"],
             "net_cash_pct_mcap": metrics.get("net_cash_pct_mcap", 0),
-            "pe": pe,
-            "pb": pb,
-            "p_fcf": p_fcf,
+            "pe": metrics.get("pe", 0),
+            "pb": metrics.get("pb", 0),
+            "p_fcf": snap["p_fcf"],
             "rsi": metrics.get("rsi"),
             "metrics": metrics,
             "signals": formatted,
-            "summary": summary,
+            "summary": snap["summary"],
             "_market": "asx",
             "_live": True,
-            "price_trend": price_trend,
-            "rsi_trend": rsi_pack.get("rsi_trend") or [],
-            "earnings_history": earnings_history,
+            "price_trend": snap["price_trend"],
+            "rsi_trend": snap["rsi_trend"],
+            "earnings_history": snap["earnings_history"],
         }
-        try:
-            from data.earnings_multiples import attach_earnings_multiples
-            attach_earnings_multiples(stock)
-        except Exception:
-            pass
+        attach_sec_and_mining_detail(
+            stock,
+            yf_symbol,
+            include_edgar=False,
+            include_sec_mining=False,
+            include_asx_mining=False,
+        )
         return _sanitize_stock_figures(stock)
     except Exception as e:
         logger.warning(f"_fetch_single_asx failed for {t}: {e}")

@@ -71,26 +71,66 @@ def _symbols_from_df(df, symbol_cols: tuple) -> list[str]:
     return out
 
 
-def load_russell1000_tickers() -> list[str]:
-    """Russell 1000 constituents (Wikipedia)."""
+_us_index_cache: dict[str, tuple[float, list[str]]] = {}
+_US_INDEX_CACHE_TTL_SEC = 3600.0
+
+
+def load_russell1000_tickers(force_live: bool = False) -> list[str]:
+    """Russell 1000 constituents (SQLite/memory cache first unless force_live=True, else Wikipedia)."""
+    import time
+
+    now = time.time()
+    cached = _us_index_cache.get(BUILTIN_RUSSELL1000_LIST_ID)
+    if not force_live and cached and (now - cached[0]) < _US_INDEX_CACHE_TTL_SEC:
+        return list(cached[1])
+
+    if not force_live:
+        db_syms = _load_builtin_fallback(BUILTIN_RUSSELL1000_LIST_ID)
+        if len(db_syms) >= 900:
+            _us_index_cache[BUILTIN_RUSSELL1000_LIST_ID] = (now, db_syms)
+            return list(db_syms)
+
     tables = _read_wikipedia_tables("https://en.wikipedia.org/wiki/Russell_1000_Index")
     for df in tables:
         if len(df) < 900:
             continue
         syms = _symbols_from_df(df, ("Symbol", "Ticker"))
         if len(syms) >= 900:
-            return sorted(set(syms))
-    return _load_builtin_fallback(BUILTIN_RUSSELL1000_LIST_ID)
+            res = sorted(set(syms))
+            _us_index_cache[BUILTIN_RUSSELL1000_LIST_ID] = (now, res)
+            return res
+    fallback = _load_builtin_fallback(BUILTIN_RUSSELL1000_LIST_ID)
+    if fallback:
+        _us_index_cache[BUILTIN_RUSSELL1000_LIST_ID] = (now, fallback)
+    return fallback
 
 
-def load_nasdaq100_tickers() -> list[str]:
-    """Nasdaq-100 constituents (Wikipedia)."""
+def load_nasdaq100_tickers(force_live: bool = False) -> list[str]:
+    """Nasdaq-100 constituents (SQLite/memory cache first unless force_live=True, else Wikipedia)."""
+    import time
+
+    now = time.time()
+    cached = _us_index_cache.get(BUILTIN_NASDAQ100_LIST_ID)
+    if not force_live and cached and (now - cached[0]) < _US_INDEX_CACHE_TTL_SEC:
+        return list(cached[1])
+
+    if not force_live:
+        db_syms = _load_builtin_fallback(BUILTIN_NASDAQ100_LIST_ID)
+        if 90 <= len(db_syms) <= 110:
+            _us_index_cache[BUILTIN_NASDAQ100_LIST_ID] = (now, db_syms)
+            return list(db_syms)
+
     tables = _read_wikipedia_tables("https://en.wikipedia.org/wiki/Nasdaq-100")
     for df in tables:
         syms = _symbols_from_df(df, ("Ticker", "Symbol"))
         if 90 <= len(syms) <= 110:
-            return sorted(set(syms))
-    return _load_builtin_fallback(BUILTIN_NASDAQ100_LIST_ID)
+            res = sorted(set(syms))
+            _us_index_cache[BUILTIN_NASDAQ100_LIST_ID] = (now, res)
+            return res
+    fallback = _load_builtin_fallback(BUILTIN_NASDAQ100_LIST_ID)
+    if fallback:
+        _us_index_cache[BUILTIN_NASDAQ100_LIST_ID] = (now, fallback)
+    return fallback
 
 
 def _load_builtin_fallback(list_id: str) -> list[str]:
@@ -108,12 +148,27 @@ def _load_builtin_fallback(list_id: str) -> list[str]:
     return []
 
 
-def load_us_index_sets() -> dict[str, set[str]]:
+_us_index_sets_cache: tuple[float, dict[str, set[str]]] | None = None
+
+
+def load_us_index_sets(force_live: bool = False) -> dict[str, set[str]]:
     """Ticker membership for Russell 1000 and Nasdaq-100 (Yahoo symbols)."""
-    return {
-        "russell1000": set(load_russell1000_tickers()),
-        "nasdaq100": set(load_nasdaq100_tickers()),
+    import time
+
+    global _us_index_sets_cache
+    now = time.time()
+    if (
+        not force_live
+        and _us_index_sets_cache is not None
+        and (now - _us_index_sets_cache[0]) < _US_INDEX_CACHE_TTL_SEC
+    ):
+        return _us_index_sets_cache[1]
+    sets = {
+        "russell1000": set(load_russell1000_tickers(force_live=force_live)),
+        "nasdaq100": set(load_nasdaq100_tickers(force_live=force_live)),
     }
+    _us_index_sets_cache = (now, sets)
+    return sets
 
 
 def us_indices_for_symbol(sym: str, index_sets: dict[str, set[str]] | None = None) -> list[str]:

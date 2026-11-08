@@ -117,16 +117,40 @@ def memo_exists(ticker: str, vault: Path | None = None) -> bool:
     return bool(p and p.is_file())
 
 
-def memo_obsidian_uri(ticker: str, vault: Path | None = None) -> str | None:
-    if not memo_exists(ticker, vault):
-        return None
+def memo_obsidian_uri(
+    ticker: str,
+    vault: Path | None = None,
+    *,
+    _verified_exists: bool = False,
+) -> str | None:
     root = vault or vault_root()
+    if not _verified_exists and not memo_exists(ticker, root):
+        return None
     vault_name = (root.name if root else "") or os.environ.get("OBSIDIAN_VAULT_NAME", "")
     if not vault_name:
         return None
     rel = memo_rel(ticker)
     file_no_ext = rel[:-3] if rel.endswith(".md") else rel
     return f"obsidian://open?vault={quote(vault_name)}&file={quote(file_no_ext)}"
+
+
+def list_existing_memo_syms(vault: Path | None = None) -> tuple[Path | None, set[str]]:
+    """Scan the vault memo directory once and return (vault_root, set_of_uppercase_ticker_stems)."""
+    root = vault or vault_root()
+    if not root:
+        return None, set()
+    try:
+        base = (root / MEMO_DIR).resolve()
+        if not base.is_dir():
+            return root, set()
+        syms = {
+            p.stem.upper()
+            for p in base.glob("*.md")
+            if not p.is_symlink() and p.is_file()
+        }
+        return root, syms
+    except Exception:
+        return root, set()
 
 
 def memo_status(ticker: str, vault: Path | None = None) -> dict[str, Any]:
@@ -150,7 +174,7 @@ def memo_status(ticker: str, vault: Path | None = None) -> dict[str, Any]:
         "exists": exists,
         "path": str(p) if p else None,
         "rel": memo_rel(ticker) if root else None,
-        "uri": memo_obsidian_uri(ticker, root) if exists else None,
+        "uri": memo_obsidian_uri(ticker, root, _verified_exists=True) if exists else None,
         "quant_score": fm.get("quant_score"),
         "composite_score": fm.get("composite_score"),
         "snapshot_at": _as_str(fm.get("snapshot_at") or fm.get("enriched_at")),
@@ -158,17 +182,29 @@ def memo_status(ticker: str, vault: Path | None = None) -> dict[str, Any]:
     }
 
 
-def attach_memo_status(stock: dict, vault: Path | None = None) -> dict:
+def attach_memo_status(
+    stock: dict,
+    vault: Path | None = None,
+    *,
+    existing_syms: set[str] | None = None,
+) -> dict:
     """Set wiki_memo_uri when the opportunity file exists (registry optional)."""
     if not stock:
         return stock
-    st = memo_status(stock.get("ticker") or "", vault)
-    stock["vault_memo_exists"] = bool(st.get("exists"))
-    stock["vault_ok"] = bool(st.get("vault_ok"))
-    if st.get("uri") and not stock.get("wiki_memo_uri"):
-        stock["wiki_memo_uri"] = st["uri"]
-    if st.get("exists"):
-        stock.setdefault("vault_memo_rel", st.get("rel"))
+    root = vault if vault is not None else vault_root()
+    ticker = stock.get("ticker") or ""
+    sym = _safe_sym(ticker)
+    if existing_syms is not None:
+        exists = bool(root and sym and sym in existing_syms)
+    else:
+        exists = bool(root and sym and memo_exists(sym, root))
+    stock["vault_memo_exists"] = exists
+    stock["vault_ok"] = bool(root)
+    if exists:
+        uri = memo_obsidian_uri(sym, root, _verified_exists=True)
+        if uri and not stock.get("wiki_memo_uri"):
+            stock["wiki_memo_uri"] = uri
+        stock.setdefault("vault_memo_rel", memo_rel(sym))
     return stock
 
 

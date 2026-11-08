@@ -47,36 +47,22 @@ def is_us_edgar_eligible(ticker: str) -> bool:
     return True
 
 
-def _ensure_identity():
-    global _identity_set
-    if _identity_set:
-        return
-    try:
-        from edgar import set_identity
-        identity = sec_edgar_identity()
-        if not identity:
-            logger.warning(
-                "SEC_EDGAR_IDENTITY (or SCREENER_CONTACT_EMAIL) not set — "
-                "EDGAR requests may fail; see .env.example"
-            )
-            return
-        set_identity(identity)
-        _identity_set = True
-    except Exception as e:
-        logger.warning("SEC EDGAR identity setup failed: %s", e)
+from data.db import connect_db
+from data.sec_pilot_common import ensure_sec_identity as _ensure_identity
+
+_EDGAR_DDL = (
+    """
+    CREATE TABLE IF NOT EXISTS us_edgar_cache (
+        ticker TEXT PRIMARY KEY,
+        last_updated TEXT,
+        metrics_json TEXT
+    )
+    """,
+)
 
 
 def _edgar_conn(db_path: str = DEFAULT_UNIVERSE_DB):
-    conn = sqlite3.connect(db_path)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS us_edgar_cache (
-            ticker TEXT PRIMARY KEY,
-            last_updated TEXT,
-            metrics_json TEXT
-        )
-    """)
-    conn.commit()
-    return conn
+    return connect_db(db_path, schema_key="us_edgar_cache", ddl=_EDGAR_DDL)
 
 
 def _cache_get(ticker: str, max_days: int = EDGAR_CACHE_MAX_AGE_DAYS, db_path: str = DEFAULT_UNIVERSE_DB) -> dict | None:
@@ -101,6 +87,42 @@ def _cache_get(ticker: str, max_days: int = EDGAR_CACHE_MAX_AGE_DAYS, db_path: s
     except Exception as e:
         logger.warning("EDGAR cache read failed for %s: %s", ticker, e)
         return None
+
+
+def _cache_get_many(
+    tickers: list[str] | set[str] | None = None,
+    max_days: int = EDGAR_CACHE_MAX_AGE_DAYS,
+    db_path: str = DEFAULT_UNIVERSE_DB,
+) -> dict[str, dict]:
+    """Load cached EDGAR payloads in a single SQLite query."""
+    try:
+        conn = _edgar_conn(db_path)
+        rows = conn.execute(
+            "SELECT ticker, last_updated, metrics_json FROM us_edgar_cache"
+        ).fetchall()
+        conn.close()
+        want = {t.upper() for t in tickers} if tickers is not None else None
+        now = datetime.now()
+        cutoff = timedelta(days=max_days) if max_days > 0 else None
+        out: dict[str, dict] = {}
+        for ticker, last_updated, raw in rows:
+            sym = (ticker or "").upper()
+            if not sym or (want is not None and sym not in want) or not raw:
+                continue
+            if cutoff is not None and last_updated:
+                try:
+                    if now - datetime.fromisoformat(last_updated) > cutoff:
+                        continue
+                except Exception:
+                    pass
+            try:
+                out[sym] = json.loads(raw)
+            except Exception:
+                pass
+        return out
+    except Exception as e:
+        logger.warning("EDGAR batch cache read failed: %s", e)
+        return {}
 
 
 def _cache_put(ticker: str, payload: dict, db_path: str = DEFAULT_UNIVERSE_DB):
@@ -540,14 +562,24 @@ def enrich_us_stocks_edgar_cached(stocks: list) -> list:
 
 def enrich_stocks_edgar_cached(stocks: list) -> list:
     """Attach cached SEC EDGAR metrics for US-eligible tickers only."""
+    eligible_syms: list[str] = []
     for stock in stocks:
         sym = (stock.get("ticker") or "").strip().upper()
         if not is_us_edgar_eligible(sym):
             stock["_edgar_eligible"] = False
             continue
         stock["_edgar_eligible"] = True
-        cached = _cache_get(sym.replace(".AX", ""))
-        attach_edgar_to_stock(stock, edgar=cached or _empty_edgar_payload(), ticker=sym)
+        eligible_syms.append(sym.replace(".AX", ""))
+    if not eligible_syms:
+        return stocks
+    cache_map = _cache_get_many(eligible_syms)
+    empty_payload = _empty_edgar_payload()
+    for stock in stocks:
+        if not stock.get("_edgar_eligible"):
+            continue
+        sym = (stock.get("ticker") or "").strip().upper()
+        cached = cache_map.get(sym.replace(".AX", ""))
+        attach_edgar_to_stock(stock, edgar=cached or empty_payload, ticker=sym)
     return stocks
 
 

@@ -124,67 +124,67 @@ def load_asx_mining_universe() -> dict:
         return defaults
 
 
+_ASX_MINING_DDL = (
+    """
+    CREATE TABLE IF NOT EXISTS asx_mining_announcements (
+        document_key TEXT PRIMARY KEY,
+        ticker TEXT,
+        date TEXT,
+        headline TEXT,
+        announcement_type TEXT,
+        is_price_sensitive INTEGER,
+        url TEXT,
+        fetched_at TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS asx_mining_summary (
+        ticker TEXT PRIMARY KEY,
+        yf_symbol TEXT,
+        company_name TEXT,
+        commodities_json TEXT,
+        -- phase 1
+        has_reorg_signal INTEGER,
+        reorg_survivor_candidate INTEGER,
+        reorg_event_class TEXT,
+        reorg_date TEXT,
+        reorg_headline TEXT,
+        reorg_manual INTEGER,
+        reorg_note TEXT,
+        -- phase 2
+        reserve_life_years REAL,
+        life_confidence TEXT,
+        reserve_display TEXT,
+        production_display TEXT,
+        reserve_snippet TEXT,
+        production_snippet TEXT,
+        has_jorc_language INTEGER,
+        -- phase 3
+        cost_metric TEXT,
+        cost_value REAL,
+        cost_unit TEXT,
+        cost_display TEXT,
+        cost_snippet TEXT,
+        cost_commodity TEXT,
+        peer_count INTEGER,
+        cost_rank INTEGER,
+        cost_rank_pct REAL,
+        low_cost_quartile INTEGER,
+        -- meta
+        us_crossfill TEXT,
+        sources_json TEXT,
+        parse_notes_json TEXT,
+        last_scanned TEXT,
+        scan_error TEXT
+    )
+    """,
+)
+
+
 def _conn(db_path: str = DEFAULT_DB) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS asx_mining_announcements (
-            document_key TEXT PRIMARY KEY,
-            ticker TEXT,
-            date TEXT,
-            headline TEXT,
-            announcement_type TEXT,
-            is_price_sensitive INTEGER,
-            url TEXT,
-            fetched_at TEXT
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS asx_mining_summary (
-            ticker TEXT PRIMARY KEY,
-            yf_symbol TEXT,
-            company_name TEXT,
-            commodities_json TEXT,
-            -- phase 1
-            has_reorg_signal INTEGER,
-            reorg_survivor_candidate INTEGER,
-            reorg_event_class TEXT,
-            reorg_date TEXT,
-            reorg_headline TEXT,
-            reorg_manual INTEGER,
-            reorg_note TEXT,
-            -- phase 2
-            reserve_life_years REAL,
-            life_confidence TEXT,
-            reserve_display TEXT,
-            production_display TEXT,
-            reserve_snippet TEXT,
-            production_snippet TEXT,
-            has_jorc_language INTEGER,
-            -- phase 3
-            cost_metric TEXT,
-            cost_value REAL,
-            cost_unit TEXT,
-            cost_display TEXT,
-            cost_snippet TEXT,
-            cost_commodity TEXT,
-            peer_count INTEGER,
-            cost_rank INTEGER,
-            cost_rank_pct REAL,
-            low_cost_quartile INTEGER,
-            -- meta
-            us_crossfill TEXT,
-            sources_json TEXT,
-            parse_notes_json TEXT,
-            last_scanned TEXT,
-            scan_error TEXT
-        )
-        """
-    )
-    conn.commit()
-    return conn
+    from data.db import connect_db
+
+    return connect_db(db_path, schema_key="asx_mining", ddl=_ASX_MINING_DDL)
 
 
 def _norm_ticker(t: str) -> str:
@@ -1524,13 +1524,28 @@ def attach_asx_mining_to_stock(stock: dict, summary: dict | None = None, ticker:
 
 
 def enrich_stocks_asx_mining_cached(stocks: list) -> list:
+    if not stocks:
+        return stocks
+    try:
+        by_key: dict[str, dict] = {}
+        for s in list_asx_mining_summaries():
+            t = _norm_ticker(s.get("ticker") or "")
+            yf = (s.get("yf_symbol") or "").strip().upper()
+            if t:
+                by_key[t] = s
+                by_key[f"{t}.AX"] = s
+            if yf:
+                by_key[yf] = s
+    except Exception as e:
+        logger.warning("enrich_stocks_asx_mining_cached batch load failed: %s", e)
+        return stocks
     for stock in stocks:
         sym = (stock.get("ticker") or "").strip().upper()
         if not sym:
             continue
-        # Only attach when we have a summary (ASX pilot or .AX)
-        if get_asx_mining_summary(sym, max_age_days=0):
-            attach_asx_mining_to_stock(stock, ticker=sym)
+        summary = by_key.get(sym) or by_key.get(_norm_ticker(sym))
+        if summary:
+            attach_asx_mining_to_stock(stock, summary=summary, ticker=sym)
     return stocks
 
 
