@@ -58,7 +58,7 @@ from scoring.quant_score import get_weights_public
 
 logger = logging.getLogger(__name__)
 
-# 12 Granular Supervised Features
+# 13 Granular Supervised Features
 SUPERVISED_FEATURES: list[dict[str, Any]] = [
     {"key": "fcf_yield", "label": "FCF Yield %", "pillar": "valuation", "higher_is_better": True},
     {"key": "earnings_yield_ev", "label": "EBITDA / EV %", "pillar": "valuation", "higher_is_better": True},
@@ -70,6 +70,7 @@ SUPERVISED_FEATURES: list[dict[str, Any]] = [
     {"key": "below_200w_ma_disc", "label": "200w MA Discount", "pillar": "price_posture", "higher_is_better": True},
     {"key": "oversold_rsi", "label": "Oversold RSI Cushion", "pillar": "price_posture", "higher_is_better": True},
     {"key": "insider_conviction", "label": "Insider Buy Conviction", "pillar": "insider", "higher_is_better": True},
+    {"key": "cloner_conviction", "label": "Superinvestor 13F Conviction", "pillar": "insider", "higher_is_better": True},
     {"key": "annual_buyback_pct", "label": "Annual Buyback Yield %", "pillar": "buyback_at_low", "higher_is_better": True},
     {"key": "buyback_at_low_inter", "label": "Buyback x Near-52w-Low", "pillar": "buyback_at_low", "higher_is_better": True},
 ]
@@ -192,6 +193,12 @@ def _extract_feature_vector_from_record(
     ins_conv = min(10.0, float(ins_n) * 1.5 + (math.log10(max(1.0, ins_val)) - 3.5 if ins_val > 5000 else 0.0))
     ins_conv = max(0.0, ins_conv)
 
+    # 10b. Superinvestor 13F / ASX Substantial Holder Conviction
+    cloner_cnt = int(stock.get("cloner_holder_count") or m.get("cloner_holder_count") or 0)
+    cloner_new = int(stock.get("cloner_new_position_flag") or m.get("cloner_new_position_flag") or 0)
+    cloner_max_w = _safe_float(stock.get("cloner_max_weight_pct") or m.get("cloner_max_weight_pct"), 0.0) or 0.0
+    cloner_conv = min(10.0, float(cloner_cnt) * 2.0 + (2.0 if cloner_new else 0.0) + min(4.0, cloner_max_w * 0.25))
+
     # 11. Annual Buyback Yield %
     bb_pct = (
         annual_buyback_pct
@@ -219,6 +226,7 @@ def _extract_feature_vector_from_record(
         below_200w_disc,
         oversold_rsi,
         ins_conv,
+        cloner_conv,
         bb_pct,
         bb_low_inter,
     ]

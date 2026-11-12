@@ -861,6 +861,7 @@ def fetch_bakerhughes_aogr(
         re.I,
     )
     points: list[dict] = []
+    total_parsed = 0
     parts = re.split(r"(\d{2}/\d{2}/\d{4})", html)
     for i in range(1, len(parts) - 1, 2):
         raw_d = parts[i]
@@ -872,15 +873,17 @@ def fetch_bakerhughes_aogr(
             dt = datetime.strptime(raw_d, "%m/%d/%Y").date()
         except ValueError:
             continue
+        total_parsed += 1
         d = dt.isoformat()
         if start and d < start:
             continue
         points.append({"date": d, "value": float(m.group(1))})
+    if total_parsed < 8:
+        raise RuntimeError(
+            f"AOGR Baker Hughes {kind}: only {total_parsed} weekly points parsed"
+        )
     by_date = {p["date"]: p for p in points}
-    out = [by_date[k] for k in sorted(by_date)]
-    if len(out) < 8:
-        raise RuntimeError(f"AOGR Baker Hughes {kind}: only {len(out)} weekly points")
-    return out
+    return [by_date[k] for k in sorted(by_date)]
 
 
 def _fetch_provider(
@@ -983,12 +986,21 @@ def collect_series(
                 full=full,
             )
             points = _apply_store_transform(series_id, meta, points)
-            stored = upsert_points(
-                series_id,
-                points,
-                source=provider,
-                source_id=native,
-                db_path=db_path,
+            more_sources = attempts.index(src) < len(attempts) - 1
+            if not points and more_sources:
+                errors.append(f"{provider}/{native}: returned 0 points")
+                time.sleep(REQUEST_SLEEP)
+                continue
+            stored = (
+                upsert_points(
+                    series_id,
+                    points,
+                    source=provider,
+                    source_id=native,
+                    db_path=db_path,
+                )
+                if points
+                else 0
             )
             time.sleep(REQUEST_SLEEP)
             latest = max((str(p.get("date") or "") for p in points), default="")
@@ -1001,7 +1013,6 @@ def collect_series(
                     age_days = (date.today() - datetime.fromisoformat(latest).date()).days
                 except ValueError:
                     age_days = None
-            more_sources = attempts.index(src) < len(attempts) - 1
             result = {
                 "series_id": series_id,
                 "ok": True,

@@ -1,0 +1,16 @@
+{
+  "last_category": "mid_small_value",
+  "last_ticker": "BHF",
+  "last_date": "2026-11-12",
+  "rotation_order": [
+    "asx_mining",
+    "energy_dc_power",
+    "asia_opps",
+    "asx_general",
+    "us_value",
+    "brazil_latam",
+    "airlines_pariah",
+    "mid_small_value"
+  ],
+  "updated_at": "2026-11-12T09:08:00"
+}

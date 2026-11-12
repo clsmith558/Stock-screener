@@ -66,6 +66,20 @@ BUYBACK_ANNOUNCEMENT_TYPES = (
     "buy-back",
     "on-market buy-back",
 )
+
+# Watchlist alert keywords — Alliance Aviation (AQZ) debt covenants & contract renewals
+AQZ_COVENANT_KEYWORDS = [
+    "covenant", "debt facility", "syndicated facility", "syndicated debt",
+    "banking facility", "credit facility", "waiver", "facility agreement",
+    "financier", "refinanc", "debt maturity", "lender", "borrowing facility",
+    "finance facility"
+]
+AQZ_CONTRACT_KEYWORDS = [
+    "contract renewal", "contract extension", "wet lease", "wet-lease",
+    "qantas", "virgin", "bhp", "rio tinto", "south32", "newmont",
+    "acmi", "charter agreement", "contract award", "agreement extension",
+    "qantaslink"
+]
 MAX_MARKET_PAGES = 160
 INCREMENTAL_MAX_PAGES = 30
 
@@ -433,7 +447,7 @@ def fetch_announcements_for_tickers(
 
     # Classify (headline level first)
     for ann in new_anns:
-        ann["classification"] = _headline_classify(ann["headline"])
+        ann["classification"] = _headline_classify(ann["headline"], ticker=ann.get("ticker", ""))
 
     # Save to cache
     if new_anns and use_cache:
@@ -454,9 +468,18 @@ def _headline_refine_insider(headline: str) -> str:
     return "other"
 
 
-def _headline_classify(headline: str) -> str:
-    """Fast headline-only classification."""
+def _headline_classify(headline: str, ticker: str = "") -> str:
+    """Fast headline-only classification with ticker-specific alert triggers."""
     h = headline.lower()
+    t = (ticker or "").upper().replace(".AX", "")
+
+    # Priority watchlist alert checks (Alliance Aviation AQZ debt covenants & contract renewals)
+    if t == "AQZ":
+        if any(kw in h for kw in AQZ_COVENANT_KEYWORDS):
+            return "aqz_covenant_alert"
+        if any(kw in h for kw in AQZ_CONTRACT_KEYWORDS):
+            return "aqz_contract_alert"
+
     if any(kw in h for kw in BUYBACK_KEYWORDS):
         return "buyback"
     if any(kw in h for kw in SUBSTANTIAL_HOLDER_KEYWORDS):
@@ -467,7 +490,20 @@ def _headline_classify(headline: str) -> str:
 
 
 def _classify_item(item: dict) -> str:
-    """Classify using API announcementTypes first, then headline."""
+    """Classify using API announcementTypes first, then headline with ticker awareness."""
+    ticker = (item.get("symbol") or (item.get("companies") or [{}])[0].get("symbol", "")).upper().replace(".AX", "")
+    headline = item.get("headline", "")
+
+    # Watchlist alert rules for AQZ
+    if ticker == "AQZ":
+        h = headline.lower()
+        if any(kw in h for kw in AQZ_COVENANT_KEYWORDS):
+            logger.warning("🚨 [AQZ COVENANT ALERT]: %s | %s", item.get("date"), headline)
+            return "aqz_covenant_alert"
+        if any(kw in h for kw in AQZ_CONTRACT_KEYWORDS):
+            logger.info("📋 [AQZ CONTRACT ALERT]: %s | %s", item.get("date"), headline)
+            return "aqz_contract_alert"
+
     types = " ".join(t.lower() for t in (item.get("announcementTypes") or []))
     if any(t in types for t in BUYBACK_ANNOUNCEMENT_TYPES):
         return "buyback"
@@ -481,7 +517,7 @@ def _classify_item(item: dict) -> str:
         )
     ):
         return "insider"
-    return _headline_classify(item.get("headline", ""))
+    return _headline_classify(headline, ticker=ticker)
 
 
 def _item_to_announcement(item: dict, since: datetime.date) -> Optional[Dict]:
@@ -630,7 +666,7 @@ def load_relevant_announcements_from_db(
     days: int = 365,
     db_path: str = DEFAULT_DB_PATH,
 ) -> List[Dict]:
-    """Load insider/buyback announcements already classified in SQLite."""
+    """Load insider, buyback, and priority watchlist alert announcements already classified in SQLite."""
     init_db(db_path)
     conn = sqlite3.connect(db_path)
     since = (datetime.now() - timedelta(days=days)).date().isoformat()
@@ -639,7 +675,33 @@ def load_relevant_announcements_from_db(
         SELECT {_ANN_SELECT_COLS}
         FROM announcements
         WHERE date >= ?
-          AND classification IN ('insider', 'insider_purchase', 'insider_sale', 'buyback')
+          AND classification IN (
+              'insider', 'insider_purchase', 'insider_sale', 'buyback',
+              'aqz_covenant_alert', 'aqz_contract_alert'
+          )
+        ORDER BY date DESC
+        """,
+        (since,),
+    ).fetchall()
+    conn.close()
+    return [_announcement_from_db_row(r) for r in rows]
+
+
+def load_aqz_alerts_from_db(
+    days: int = 365,
+    db_path: str = DEFAULT_DB_PATH,
+) -> List[Dict]:
+    """Retrieve all debt facility, covenant compliance, and contract renewal alert announcements for AQZ."""
+    init_db(db_path)
+    conn = sqlite3.connect(db_path)
+    since = (datetime.now() - timedelta(days=days)).date().isoformat()
+    rows = conn.execute(
+        f"""
+        SELECT {_ANN_SELECT_COLS}
+        FROM announcements
+        WHERE ticker = 'AQZ'
+          AND date >= ?
+          AND classification IN ('aqz_covenant_alert', 'aqz_contract_alert')
         ORDER BY date DESC
         """,
         (since,),

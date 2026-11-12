@@ -346,6 +346,9 @@ def run_updates(
                     "last_error": result.get("error") or result.get("stderr_tail", "")[-400:],
                     "description": job.get("description") or "",
                 }
+        if not dry_run:
+            state["last_orchestrator_run"] = _iso()
+            _save_state(log_dir, state)
 
     summary["finished_at"] = _iso()
     state["last_orchestrator_run"] = summary["finished_at"]

@@ -793,6 +793,385 @@ def quote_price(info: dict) -> float:
     return safe_float(info.get("currentPrice")) or safe_float(info.get("regularMarketPrice"))
 
 
+def calc_ephemeral_point_in_time_metrics(
+    info: dict,
+    price: float,
+    *,
+    mcap: float = 0.0,
+    ocf_raw: float = 0.0,
+    fx_scale: float = 1.0,
+) -> dict[str, Any]:
+    """
+    Extract ephemeral point-in-time metrics from yfinance `.info` that get overwritten
+    every month (short interest, days to cover, consensus EPS trajectory, analyst neglect,
+    street price targets, margins, and Sloan accruals).
+    """
+    info = info or {}
+    price = safe_float(price)
+    mcap = safe_float(mcap) or safe_float(info.get("marketCap"))
+    fx_scale = safe_float(fx_scale, 1.0) or 1.0
+
+    # 1. Short Interest & Positioning
+    raw_short_pct = safe_float(info.get("shortPercentOfFloat"), None)
+    short_pct_float = None
+    if raw_short_pct is not None and raw_short_pct >= 0:
+        # Yahoo usually returns decimal (0.085 = 8.5%), guard if already > 1.0
+        pct_val = raw_short_pct * 100.0 if raw_short_pct <= 1.5 else raw_short_pct
+        if 0 <= pct_val <= 150:
+            short_pct_float = safe_round(pct_val, 2, None)
+
+    short_ratio = safe_round(info.get("shortRatio"), 2, None)
+    if short_ratio is not None and short_ratio <= 0:
+        short_ratio = None
+
+    shares_short = int(safe_float(info.get("sharesShort"), 0)) or None
+    shares_short_prior = int(safe_float(info.get("sharesShortPriorMonth"), 0)) or None
+    short_mom_change_pct = None
+    if shares_short and shares_short_prior and shares_short_prior > 0:
+        short_mom_change_pct = safe_round(
+            ((shares_short - shares_short_prior) / shares_short_prior) * 100.0, 2, None
+        )
+
+    # 2. Consensus Expectations & Analyst Coverage (Templeton Neglect / Revision Inflection)
+    forward_eps = safe_round(info.get("forwardEps"), 3, None)
+    trailing_eps = safe_round(info.get("trailingEps"), 3, None)
+    eps_forward_vs_trailing_pct = None
+    if (
+        forward_eps is not None
+        and trailing_eps is not None
+        and abs(trailing_eps) > 0.05
+    ):
+        raw_eps_chg = ((forward_eps - trailing_eps) / abs(trailing_eps)) * 100.0
+        if -500.0 <= raw_eps_chg <= 1000.0:
+            eps_forward_vs_trailing_pct = safe_round(raw_eps_chg, 1, None)
+
+    analyst_count = int(safe_float(info.get("numberOfAnalystOpinions"), 0))
+    recommendation_mean = safe_round(info.get("recommendationMean"), 2, None)
+    target_mean_price = safe_round(info.get("targetMeanPrice"), 2, None)
+    target_low_price = safe_round(info.get("targetLowPrice"), 2, None)
+    upside_to_low_target_pct = None
+    if price > 0 and target_low_price and target_low_price > 0:
+        upside_to_low_target_pct = safe_round(
+            ((target_low_price - price) / price) * 100.0, 1, None
+        )
+
+    # 3. Balance Sheet Survival, Margins & Sloan Accruals
+    current_ratio = safe_round(info.get("currentRatio"), 2, None)
+    quick_ratio = safe_round(info.get("quickRatio"), 2, None)
+    gm_raw = safe_float(info.get("grossMargins"), None)
+    gross_margins_pct = safe_round(gm_raw * 100.0, 1, None) if gm_raw is not None else None
+    om_raw = safe_float(info.get("operatingMargins"), None)
+    operating_margins_pct = safe_round(om_raw * 100.0, 1, None) if om_raw is not None else None
+    rev_g_raw = safe_float(info.get("revenueGrowth"), None)
+    revenue_growth_pct = safe_round(rev_g_raw * 100.0, 1, None) if rev_g_raw is not None else None
+    inst_raw = safe_float(info.get("heldPercentInstitutions"), None)
+    held_pct_institutions = safe_round(inst_raw * 100.0, 2, None) if inst_raw is not None else None
+
+    # Sloan Accrual proxy: (Net Income - OCF) / Market Cap %
+    # Negative = OCF exceeds Net Income (high cash conversion); high positive = accrual bloat
+    ni_raw = safe_float(info.get("netIncomeToCommon"), None)
+    if ocf_raw == 0.0:
+        ocf_raw = safe_float(info.get("operatingCashflow"), 0.0) * fx_scale
+    sloan_accrual_pct_mcap = None
+    if ni_raw is not None and ocf_raw != 0.0 and mcap > 0:
+        ni_quote = ni_raw * fx_scale
+        accrual_pct = ((ni_quote - ocf_raw) / mcap) * 100.0
+        if -250.0 <= accrual_pct <= 250.0:
+            sloan_accrual_pct_mcap = safe_round(accrual_pct, 2, None)
+
+    return {
+        "short_pct_float": short_pct_float,
+        "short_ratio": short_ratio,
+        "shares_short": shares_short,
+        "shares_short_prior_month": shares_short_prior,
+        "short_mom_change_pct": short_mom_change_pct,
+        "forward_eps": forward_eps,
+        "trailing_eps": trailing_eps,
+        "eps_forward_vs_trailing_pct": eps_forward_vs_trailing_pct,
+        "analyst_count": analyst_count,
+        "recommendation_mean": recommendation_mean,
+        "target_mean_price": target_mean_price,
+        "target_low_price": target_low_price,
+        "upside_to_low_target_pct": upside_to_low_target_pct,
+        "current_ratio": current_ratio,
+        "quick_ratio": quick_ratio,
+        "gross_margins_pct": gross_margins_pct,
+        "operating_margins_pct": operating_margins_pct,
+        "revenue_growth_pct": revenue_growth_pct,
+        "held_pct_institutions": held_pct_institutions,
+        "sloan_accrual_pct_mcap": sloan_accrual_pct_mcap,
+    }
+
+
+def calc_microstructure_and_forensics(
+    yt,
+    info: dict,
+    *,
+    price: float = 0.0,
+    mcap: float = 0.0,
+    fcf_raw: float = 0.0,
+    fx_scale: float = 1.0,
+    hist_1d=None,
+    include_statements: bool = False,
+) -> dict[str, Any]:
+    """
+    Compute execution microstructure metrics from daily history (`median_dollar_vol_20d`,
+    `volatility_60d_ann_pct`, `max_drawdown_1y_pct`) at zero extra network cost, plus
+    optional deep financial-statement forensics (`sbc_adjusted_fcf_yield`, `capex_to_da_ratio`,
+    `shares_yoy_change_pct`, `interest_coverage`, `piotroski_f_score`) when `include_statements=True`.
+    """
+    import math
+
+    info = info or {}
+    price = safe_float(price) or quote_price(info)
+    mcap = safe_float(mcap) or safe_float(info.get("marketCap"))
+    fx_scale = safe_float(fx_scale, 1.0) or 1.0
+
+    median_dollar_vol_20d = None
+    volatility_60d_ann_pct = None
+    max_drawdown_1y_pct = None
+
+    try:
+        if hist_1d is not None and not hist_1d.empty and "Close" in hist_1d.columns:
+            closes = hist_1d["Close"].dropna()
+            if "Volume" in hist_1d.columns:
+                tail20 = hist_1d[["Close", "Volume"]].dropna().tail(20)
+                if not tail20.empty:
+                    dvols = (tail20["Close"] * tail20["Volume"]).tolist()
+                    dvols = [float(v) for v in dvols if v and float(v) > 0]
+                    if dvols:
+                        dvols.sort()
+                        median_dollar_vol_20d = safe_round(dvols[len(dvols) // 2], 0, None)
+            if len(closes) >= 20:
+                rets = closes.pct_change().dropna().tail(60)
+                if len(rets) >= 15:
+                    std_d = float(rets.std())
+                    if math.isfinite(std_d) and std_d > 0:
+                        volatility_60d_ann_pct = safe_round(std_d * math.sqrt(252.0) * 100.0, 1, None)
+            if len(closes) >= 30:
+                w252 = closes.tail(252)
+                roll_max = w252.cummax()
+                dd = ((w252 - roll_max) / roll_max).min()
+                if dd is not None and math.isfinite(float(dd)):
+                    max_drawdown_1y_pct = safe_round(float(dd) * 100.0, 1, None)
+    except Exception:
+        pass
+
+    if median_dollar_vol_20d is None and price > 0:
+        avg_vol = safe_float(info.get("averageVolume20days")) or safe_float(info.get("averageVolume"))
+        if avg_vol and avg_vol > 0:
+            median_dollar_vol_20d = safe_round(price * avg_vol, 0, None)
+
+    max_pos_usd_5pct_adv = None
+    if median_dollar_vol_20d and median_dollar_vol_20d > 0:
+        max_pos_usd_5pct_adv = safe_round(median_dollar_vol_20d * 0.05, 0, None)
+
+    # Net Debt / EBITDA from info when present
+    total_debt = safe_float(info.get("totalDebt"), 0.0) * fx_scale
+    total_cash = safe_float(info.get("totalCash"), 0.0) * fx_scale
+    ebitda_info = safe_float(info.get("ebitda"), 0.0) * fx_scale
+    net_debt_to_ebitda = None
+    if ebitda_info > 0 and (total_debt > 0 or total_cash > 0):
+        net_debt_to_ebitda = safe_round((total_debt - total_cash) / ebitda_info, 2, None)
+
+    out: dict[str, Any] = {
+        "median_dollar_vol_20d": median_dollar_vol_20d,
+        "max_pos_usd_5pct_adv": max_pos_usd_5pct_adv,
+        "volatility_60d_ann_pct": volatility_60d_ann_pct,
+        "max_drawdown_1y_pct": max_drawdown_1y_pct,
+        "net_debt_to_ebitda": net_debt_to_ebitda,
+        "forward_eps_current_yr": None,
+        "forward_eps_next_yr": None,
+        "eps_rev_30d_pct": None,
+        "eps_rev_90d_pct": None,
+        "sbc_m": None,
+        "sbc_adjusted_fcf_yield": None,
+        "capex_to_da_ratio": None,
+        "shares_yoy_change_pct": None,
+        "shares_3y_cagr_pct": None,
+        "interest_coverage": None,
+        "current_ratio_yoy_delta": None,
+        "gross_margin_yoy_delta": None,
+        "inventory_to_sales_delta_pct": None,
+        "piotroski_f_score": None,
+    }
+
+    if not include_statements or yt is None:
+        return out
+
+    # Step 1: Consensus EPS Estimate Trend (`0y` and `+1y` vs 30d/90d ago)
+    try:
+        et = getattr(yt, "eps_trend", None)
+        if et is not None and not getattr(et, "empty", True):
+            idx_str = {str(k).strip().lower(): k for k in et.index}
+            r_0y = idx_str.get("0y")
+            r_1y = idx_str.get("+1y")
+            if r_0y is not None and "current" in et.columns:
+                out["forward_eps_current_yr"] = safe_round(et.loc[r_0y, "current"], 3, None)
+            if r_1y is not None and "current" in et.columns:
+                out["forward_eps_next_yr"] = safe_round(et.loc[r_1y, "current"], 3, None)
+            # Prefer +1y or 0y row for 30d and 90d revision drift
+            rev_row = r_1y if r_1y is not None else r_0y
+            if rev_row is not None and "current" in et.columns:
+                cur_eps = safe_float(et.loc[rev_row, "current"], None)
+                if cur_eps is not None and "30daysAgo" in et.columns:
+                    e30 = safe_float(et.loc[rev_row, "30daysAgo"], None)
+                    if e30 is not None and abs(e30) > 0.02:
+                        out["eps_rev_30d_pct"] = safe_round(((cur_eps - e30) / abs(e30)) * 100.0, 2, None)
+                if cur_eps is not None and "90daysAgo" in et.columns:
+                    e90 = safe_float(et.loc[rev_row, "90daysAgo"], None)
+                    if e90 is not None and abs(e90) > 0.02:
+                        out["eps_rev_90d_pct"] = safe_round(((cur_eps - e90) / abs(e90)) * 100.0, 2, None)
+    except Exception as ex:
+        logger.debug("eps_trend extraction skipped: %s", ex)
+
+    try:
+        cf = getattr(yt, "cashflow", None)
+        inc = getattr(yt, "financials", None)
+        bs = getattr(yt, "balance_sheet", None)
+
+        def _row_vals(df, labels: tuple[str, ...]) -> list[float]:
+            if df is None or getattr(df, "empty", True):
+                return []
+            idx_map = {str(k).strip().lower(): k for k in df.index}
+            for lbl in labels:
+                k = idx_map.get(lbl.lower())
+                if k is not None:
+                    s = df.loc[k].dropna()
+                    return [float(x) for x in s.tolist() if x is not None and math.isfinite(float(x))]
+            return []
+
+        # 1. Stock-Based Compensation & True Owner FCF Yield
+        sbc_vals = _row_vals(cf, ("Stock Based Compensation", "Share Based Compensation"))
+        ocf_vals = _row_vals(cf, ("Operating Cash Flow", "Total Cash From Operating Activities"))
+        capex_vals = _row_vals(cf, ("Capital Expenditure", "Capital Expenditures"))
+        da_vals = _row_vals(
+            cf,
+            (
+                "Depreciation And Amortization",
+                "Depreciation Amortization Depletion",
+                "Depreciation",
+            ),
+        )
+        if not da_vals:
+            da_vals = _row_vals(inc, ("Reconciled Depreciation", "Depreciation And Amortization"))
+
+        if fcf_raw == 0.0:
+            fcf_raw = safe_float(info.get("freeCashflow"), 0.0) * fx_scale
+            if fcf_raw == 0.0 and ocf_vals and capex_vals:
+                fcf_raw = (ocf_vals[0] + min(0.0, capex_vals[0])) * fx_scale
+
+        if sbc_vals:
+            sbc_quote = max(0.0, sbc_vals[0]) * fx_scale
+            out["sbc_m"] = safe_round(sbc_quote / 1_000_000.0, 1, None)
+            if mcap > 0 and fcf_raw != 0.0:
+                out["sbc_adjusted_fcf_yield"] = safe_round(
+                    ((fcf_raw - sbc_quote) / mcap) * 100.0, 2, None
+                )
+        elif mcap > 0 and fcf_raw != 0.0:
+            out["sbc_adjusted_fcf_yield"] = safe_round((fcf_raw / mcap) * 100.0, 2, None)
+
+        # 2. Capital-Cycle Supply Starvation: |Capex| / D&A
+        if capex_vals and da_vals and da_vals[0] > 0:
+            out["capex_to_da_ratio"] = safe_round(abs(capex_vals[0]) / da_vals[0], 2, None)
+
+        # 3. 1Y & 3Y Share Count Cannibalization / Dilution Velocity
+        sh_vals = _row_vals(
+            bs,
+            ("Ordinary Shares Number", "Share Issued", "Common Stock Shares Outstanding"),
+        )
+        if len(sh_vals) >= 2 and sh_vals[1] > 0:
+            out["shares_yoy_change_pct"] = safe_round(
+                ((sh_vals[0] - sh_vals[1]) / sh_vals[1]) * 100.0, 2, None
+            )
+        if len(sh_vals) >= 4 and sh_vals[3] > 0 and sh_vals[0] > 0:
+            out["shares_3y_cagr_pct"] = safe_round(
+                (((sh_vals[0] / sh_vals[3]) ** (1.0 / 3.0)) - 1.0) * 100.0, 2, None
+            )
+        elif len(sh_vals) >= 3 and sh_vals[2] > 0 and sh_vals[0] > 0:
+            out["shares_3y_cagr_pct"] = safe_round(
+                (((sh_vals[0] / sh_vals[2]) ** (1.0 / 2.0)) - 1.0) * 100.0, 2, None
+            )
+
+        # 4. Interest Coverage (EBIT / Interest Expense)
+        ebit_vals = _row_vals(inc, ("EBIT", "Operating Income"))
+        int_vals = _row_vals(inc, ("Interest Expense", "Interest Expense Non Operating", "Net Interest Income"))
+        if ebit_vals and int_vals and abs(int_vals[0]) > 0:
+            out["interest_coverage"] = safe_round(ebit_vals[0] / abs(int_vals[0]), 2, None)
+
+        # 5. Piotroski F-Score (0–9) + YoY Current Ratio & Gross Margin Deltas + Inventory-to-Sales Velocity
+        ni_vals = _row_vals(inc, ("Net Income", "Net Income Common Stockholders"))
+        ta_vals = _row_vals(bs, ("Total Assets",))
+        ltd_vals = _row_vals(bs, ("Long Term Debt", "Long Term Debt And Capital Lease Obligation", "Total Debt"))
+        ca_vals = _row_vals(bs, ("Current Assets", "Total Current Assets"))
+        cl_vals = _row_vals(bs, ("Current Liabilities", "Total Current Liabilities"))
+        gp_vals = _row_vals(inc, ("Gross Profit",))
+        rev_vals = _row_vals(inc, ("Total Revenue", "Operating Revenue"))
+        inv_vals = _row_vals(bs, ("Inventory", "Total Inventory", "Inventories"))
+
+        if len(ca_vals) >= 2 and len(cl_vals) >= 2 and cl_vals[0] > 0 and cl_vals[1] > 0:
+            cr_0 = ca_vals[0] / cl_vals[0]
+            cr_1 = ca_vals[1] / cl_vals[1]
+            out["current_ratio_yoy_delta"] = safe_round(cr_0 - cr_1, 2, None)
+
+        if len(gp_vals) >= 2 and len(rev_vals) >= 2 and rev_vals[0] > 0 and rev_vals[1] > 0:
+            gm_0 = (gp_vals[0] / rev_vals[0]) * 100.0
+            gm_1 = (gp_vals[1] / rev_vals[1]) * 100.0
+            out["gross_margin_yoy_delta"] = safe_round(gm_0 - gm_1, 2, None)
+
+        if len(inv_vals) >= 2 and len(rev_vals) >= 2 and inv_vals[1] > 0 and rev_vals[1] > 0:
+            inv_yoy = ((inv_vals[0] - inv_vals[1]) / inv_vals[1]) * 100.0
+            rev_yoy = ((rev_vals[0] - rev_vals[1]) / rev_vals[1]) * 100.0
+            inv_sales_diff = inv_yoy - rev_yoy
+            if -300.0 <= inv_sales_diff <= 300.0:
+                out["inventory_to_sales_delta_pct"] = safe_round(inv_sales_diff, 1, None)
+
+        if ni_vals and ta_vals and ta_vals[0] > 0:
+            f_score = 0
+            roa_0 = ni_vals[0] / ta_vals[0]
+            ocf_0 = ocf_vals[0] if ocf_vals else 0.0
+            # (1) Positive ROA
+            if roa_0 > 0:
+                f_score += 1
+            # (2) Positive OCF
+            if ocf_0 > 0:
+                f_score += 1
+            # (3) Delta ROA > 0
+            if len(ni_vals) >= 2 and len(ta_vals) >= 2 and ta_vals[1] > 0:
+                roa_1 = ni_vals[1] / ta_vals[1]
+                if roa_0 > roa_1:
+                    f_score += 1
+            # (4) Accruals: OCF > Net Income
+            if ocf_0 > ni_vals[0]:
+                f_score += 1
+            # (5) Delta Leverage <= 0
+            if len(ltd_vals) >= 2 and len(ta_vals) >= 2 and ta_vals[1] > 0:
+                if (ltd_vals[0] / ta_vals[0]) <= (ltd_vals[1] / ta_vals[1]):
+                    f_score += 1
+            elif not ltd_vals or ltd_vals[0] == 0:
+                f_score += 1
+            # (6) Delta Current Ratio > 0
+            if len(ca_vals) >= 2 and len(cl_vals) >= 2 and cl_vals[0] > 0 and cl_vals[1] > 0:
+                if (ca_vals[0] / cl_vals[0]) > (ca_vals[1] / cl_vals[1]):
+                    f_score += 1
+            # (7) No Net Share Dilution
+            if len(sh_vals) >= 2 and sh_vals[0] <= sh_vals[1] * 1.005:
+                f_score += 1
+            # (8) Delta Gross Margin > 0
+            if len(gp_vals) >= 2 and len(rev_vals) >= 2 and rev_vals[0] > 0 and rev_vals[1] > 0:
+                if (gp_vals[0] / rev_vals[0]) > (gp_vals[1] / rev_vals[1]):
+                    f_score += 1
+            # (9) Delta Asset Turnover > 0
+            if len(rev_vals) >= 2 and len(ta_vals) >= 2 and ta_vals[1] > 0:
+                if (rev_vals[0] / ta_vals[0]) > (rev_vals[1] / ta_vals[1]):
+                    f_score += 1
+            out["piotroski_f_score"] = int(f_score)
+    except Exception as ex:
+        logger.debug("Statement forensics skipped: %s", ex)
+
+    return out
+
+
 # ---------------------- SHARED LIVE YFINANCE SNAPSHOT & DETAIL OVERLAYS (2A) ----------------------
 
 
@@ -872,6 +1251,21 @@ def fetch_yf_ticker_snapshot(
     rsi_pack = calc_rsi_metrics(yt, with_series=include_detail, hist=hist_1d)
     metrics["rsi"] = rsi_pack.get("rsi")
     metrics["rsi_period"] = rsi_pack.get("rsi_period")
+
+    # Attach microstructure & optional statement forensics
+    micro_for = calc_microstructure_and_forensics(
+        yt,
+        info,
+        price=price,
+        mcap=safe_float(metrics.get("market_cap")),
+        fcf_raw=safe_float(metrics.get("fcf_m")) * 1_000_000.0,
+        fx_scale=safe_float(metrics.get("fx_to_quote"), 1.0) or 1.0,
+        hist_1d=hist_1d,
+        include_statements=include_detail,
+    )
+    for mk, mv in micro_for.items():
+        if mv is not None or mk not in metrics:
+            metrics[mk] = mv
 
     snap: dict[str, Any] = {
         "yt": yt,

@@ -98,6 +98,39 @@ _SNAPSHOT_DDL = (
         ret_6m_pct REAL,
         ret_12m_pct REAL,
         ret_to_now_pct REAL,
+        forward_pe REAL,
+        short_pct_float REAL,
+        short_ratio REAL,
+        short_mom_change_pct REAL,
+        forward_eps REAL,
+        eps_forward_vs_trailing_pct REAL,
+        analyst_count INTEGER,
+        recommendation_mean REAL,
+        upside_to_low_target_pct REAL,
+        sbc_adjusted_fcf_yield REAL,
+        share_count_5y_change_pct REAL,
+        shares_yoy_change_pct REAL,
+        sloan_accrual_pct_mcap REAL,
+        capex_to_da_ratio REAL,
+        interest_coverage REAL,
+        piotroski_f_score INTEGER,
+        median_dollar_vol_20d REAL,
+        volatility_60d_ann_pct REAL,
+        max_drawdown_1y_pct REAL,
+        forward_eps_current_yr REAL,
+        forward_eps_next_yr REAL,
+        eps_rev_30d_pct REAL,
+        eps_rev_90d_pct REAL,
+        shares_3y_cagr_pct REAL,
+        net_debt_to_ebitda REAL,
+        current_ratio_yoy_delta REAL,
+        gross_margin_yoy_delta REAL,
+        inventory_to_sales_delta_pct REAL,
+        sector_capex_to_da_median REAL,
+        cloner_holder_count INTEGER,
+        cloner_new_position_flag INTEGER,
+        cloner_max_weight_pct REAL,
+        max_pos_usd_5pct_adv REAL,
         PRIMARY KEY (snapshot_month, ticker)
     )
     """,
@@ -106,14 +139,67 @@ _SNAPSHOT_DDL = (
     "CREATE INDEX IF NOT EXISTS idx_msnap_outlier ON monthly_stock_snapshots(snapshot_month, is_mispriced_outlier)",
 )
 
+_EXTRA_SNAPSHOT_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("forward_pe", "REAL"),
+    ("short_pct_float", "REAL"),
+    ("short_ratio", "REAL"),
+    ("short_mom_change_pct", "REAL"),
+    ("forward_eps", "REAL"),
+    ("eps_forward_vs_trailing_pct", "REAL"),
+    ("analyst_count", "INTEGER"),
+    ("recommendation_mean", "REAL"),
+    ("upside_to_low_target_pct", "REAL"),
+    ("sbc_adjusted_fcf_yield", "REAL"),
+    ("share_count_5y_change_pct", "REAL"),
+    ("shares_yoy_change_pct", "REAL"),
+    ("sloan_accrual_pct_mcap", "REAL"),
+    ("capex_to_da_ratio", "REAL"),
+    ("interest_coverage", "REAL"),
+    ("piotroski_f_score", "INTEGER"),
+    ("median_dollar_vol_20d", "REAL"),
+    ("volatility_60d_ann_pct", "REAL"),
+    ("max_drawdown_1y_pct", "REAL"),
+    ("forward_eps_current_yr", "REAL"),
+    ("forward_eps_next_yr", "REAL"),
+    ("eps_rev_30d_pct", "REAL"),
+    ("eps_rev_90d_pct", "REAL"),
+    ("shares_3y_cagr_pct", "REAL"),
+    ("net_debt_to_ebitda", "REAL"),
+    ("current_ratio_yoy_delta", "REAL"),
+    ("gross_margin_yoy_delta", "REAL"),
+    ("inventory_to_sales_delta_pct", "REAL"),
+    ("sector_capex_to_da_median", "REAL"),
+    ("cloner_holder_count", "INTEGER"),
+    ("cloner_new_position_flag", "INTEGER"),
+    ("cloner_max_weight_pct", "REAL"),
+    ("max_pos_usd_5pct_adv", "REAL"),
+)
+
 _snapshot_lock = threading.Lock()
 _monthly_scheduler_started = False
+_migrated_dbs: set[str] = set()
 
 
 def _snap_conn(db_path: str = "asx_announcements_cache.db"):
     from data.db import connect_db
 
-    return connect_db(db_path, schema_key="monthly_snapshots", ddl=_SNAPSHOT_DDL)
+    conn = connect_db(db_path, schema_key="monthly_snapshots", ddl=_SNAPSHOT_DDL)
+    if db_path not in _migrated_dbs:
+        try:
+            existing = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(monthly_stock_snapshots)").fetchall()
+            }
+            for col_name, col_type in _EXTRA_SNAPSHOT_COLUMNS:
+                if col_name not in existing:
+                    conn.execute(
+                        f"ALTER TABLE monthly_stock_snapshots ADD COLUMN {col_name} {col_type}"
+                    )
+            conn.commit()
+            _migrated_dbs.add(db_path)
+        except Exception as ex:
+            logger.debug("monthly_stock_snapshots column migration skipped: %s", ex)
+    return conn
 
 
 def _safe_num(val: Any) -> float | None:
@@ -200,6 +286,52 @@ def capture_monthly_snapshot(
         rows_to_insert: list[tuple[Any, ...]] = []
         outlier_count = 0
 
+        # Precompute sector median capex_to_da_ratio across universe (Step 4)
+        sector_capex_lists: dict[str, list[float]] = {}
+        for s in stocks:
+            sec_k = str(s.get("sector") or "Unknown")
+            cda = _safe_num((s.get("metrics") or {}).get("capex_to_da_ratio"))
+            if cda is not None and 0.0 < cda < 15.0:
+                sector_capex_lists.setdefault(sec_k, []).append(cda)
+        sector_capex_medians = {
+            sec_k: round(float(np.median(vals)), 2)
+            for sec_k, vals in sector_capex_lists.items()
+            if vals
+        }
+
+        # Load prior monthly snapshots' forward_eps to derive 30d/90d EPS revision drift when not in live cache
+        prior_feps_1m: dict[str, float] = {}
+        prior_feps_3m: dict[str, float] = {}
+        conn_pre = _snap_conn(db_path)
+        try:
+            prev_months = [
+                r[0]
+                for r in conn_pre.execute(
+                    "SELECT DISTINCT snapshot_month FROM monthly_stock_snapshots WHERE snapshot_month < ? ORDER BY snapshot_month DESC LIMIT 4",
+                    (month_str,),
+                ).fetchall()
+            ]
+            for pm in prev_months:
+                mdiff = _month_diff(pm, month_str)
+                if mdiff in (1, 2) and not prior_feps_1m:
+                    for tk_p, fe_p in conn_pre.execute(
+                        "SELECT ticker, forward_eps FROM monthly_stock_snapshots WHERE snapshot_month = ? AND forward_eps IS NOT NULL",
+                        (pm,),
+                    ).fetchall():
+                        if fe_p and abs(float(fe_p)) > 0.01:
+                            prior_feps_1m[str(tk_p).upper()] = float(fe_p)
+                if mdiff in (3, 4) and not prior_feps_3m:
+                    for tk_p, fe_p in conn_pre.execute(
+                        "SELECT ticker, forward_eps FROM monthly_stock_snapshots WHERE snapshot_month = ? AND forward_eps IS NOT NULL",
+                        (pm,),
+                    ).fetchall():
+                        if fe_p and abs(float(fe_p)) > 0.01:
+                            prior_feps_3m[str(tk_p).upper()] = float(fe_p)
+        except Exception:
+            pass
+        finally:
+            conn_pre.close()
+
         for s in stocks:
             t = str(s.get("ticker") or "").strip().upper()
             if not t:
@@ -216,6 +348,18 @@ def capture_monthly_snapshot(
 
             is_iso = 1 if mp.get("is_iso_outlier") else 0
             roic_roe = extract_metric(s, "roic_or_roe")
+            sec_str = str(s.get("sector") or "Unknown")
+            feps_cur = _safe_num(m.get("forward_eps"))
+            eps_r30 = _safe_num(m.get("eps_rev_30d_pct"))
+            if eps_r30 is None and feps_cur is not None and t in prior_feps_1m:
+                p_fe1 = prior_feps_1m[t]
+                if abs(p_fe1) > 0.01:
+                    eps_r30 = round(((feps_cur - p_fe1) / abs(p_fe1)) * 100.0, 2)
+            eps_r90 = _safe_num(m.get("eps_rev_90d_pct"))
+            if eps_r90 is None and feps_cur is not None and t in prior_feps_3m:
+                p_fe3 = prior_feps_3m[t]
+                if abs(p_fe3) > 0.01:
+                    eps_r90 = round(((feps_cur - p_fe3) / abs(p_fe3)) * 100.0, 2)
 
             rows_to_insert.append(
                 (
@@ -223,7 +367,7 @@ def capture_monthly_snapshot(
                     t,
                     now_iso,
                     str(s.get("name") or t),
-                    str(s.get("sector") or "Unknown"),
+                    sec_str,
                     str(s.get("currency") or m.get("currency") or "USD"),
                     price,
                     _safe_num(s.get("market_cap") or m.get("market_cap")),
@@ -259,6 +403,39 @@ def capture_monthly_snapshot(
                     None,  # ret_6m_pct
                     None,  # ret_12m_pct
                     0.0,   # ret_to_now_pct
+                    _safe_num(m.get("forward_pe")),
+                    _safe_num(m.get("short_pct_float")),
+                    _safe_num(m.get("short_ratio")),
+                    _safe_num(m.get("short_mom_change_pct")),
+                    feps_cur,
+                    _safe_num(m.get("eps_forward_vs_trailing_pct")),
+                    int(m["analyst_count"]) if _safe_num(m.get("analyst_count")) is not None else None,
+                    _safe_num(m.get("recommendation_mean")),
+                    _safe_num(m.get("upside_to_low_target_pct")),
+                    _safe_num(m.get("sbc_adjusted_fcf_yield")),
+                    _safe_num(m.get("share_count_5y_change_pct")),
+                    _safe_num(m.get("shares_yoy_change_pct")),
+                    _safe_num(m.get("sloan_accrual_pct_mcap")),
+                    _safe_num(m.get("capex_to_da_ratio")),
+                    _safe_num(m.get("interest_coverage")),
+                    int(m["piotroski_f_score"]) if _safe_num(m.get("piotroski_f_score")) is not None else None,
+                    _safe_num(m.get("median_dollar_vol_20d")),
+                    _safe_num(m.get("volatility_60d_ann_pct")),
+                    _safe_num(m.get("max_drawdown_1y_pct")),
+                    _safe_num(m.get("forward_eps_current_yr")),
+                    _safe_num(m.get("forward_eps_next_yr")),
+                    eps_r30,
+                    eps_r90,
+                    _safe_num(m.get("shares_3y_cagr_pct")),
+                    _safe_num(m.get("net_debt_to_ebitda")),
+                    _safe_num(m.get("current_ratio_yoy_delta")),
+                    _safe_num(m.get("gross_margin_yoy_delta")),
+                    _safe_num(m.get("inventory_to_sales_delta_pct")),
+                    sector_capex_medians.get(sec_str),
+                    int(s.get("cloner_holder_count") or m.get("cloner_holder_count") or 0),
+                    int(s.get("cloner_new_position_flag") or m.get("cloner_new_position_flag") or 0),
+                    _safe_num(s.get("cloner_max_weight_pct") or m.get("cloner_max_weight_pct")),
+                    _safe_num(m.get("max_pos_usd_5pct_adv")),
                 )
             )
 
@@ -276,9 +453,20 @@ def capture_monthly_snapshot(
                         mispriced_outlier_score, is_mispriced_outlier,
                         anomaly_score, is_iso_outlier, val_residual_z, peer_val_diff_z,
                         cluster_id, cluster_label, pca_x, pca_y,
-                        ret_1m_pct, ret_3m_pct, ret_6m_pct, ret_12m_pct, ret_to_now_pct
+                        ret_1m_pct, ret_3m_pct, ret_6m_pct, ret_12m_pct, ret_to_now_pct,
+                        forward_pe, short_pct_float, short_ratio, short_mom_change_pct,
+                        forward_eps, eps_forward_vs_trailing_pct, analyst_count, recommendation_mean,
+                        upside_to_low_target_pct, sbc_adjusted_fcf_yield, share_count_5y_change_pct,
+                        shares_yoy_change_pct, sloan_accrual_pct_mcap, capex_to_da_ratio,
+                        interest_coverage, piotroski_f_score, median_dollar_vol_20d,
+                        volatility_60d_ann_pct, max_drawdown_1y_pct,
+                        forward_eps_current_yr, forward_eps_next_yr, eps_rev_30d_pct, eps_rev_90d_pct,
+                        shares_3y_cagr_pct, net_debt_to_ebitda, current_ratio_yoy_delta,
+                        gross_margin_yoy_delta, inventory_to_sales_delta_pct, sector_capex_to_da_median,
+                        cloner_holder_count, cloner_new_position_flag, cloner_max_weight_pct,
+                        max_pos_usd_5pct_adv
                     ) VALUES (
-                        ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+                        ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
                     )
                     """,
                     rows_to_insert,

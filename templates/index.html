@@ -74,6 +74,14 @@
                             class="px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-800 text-slate-300">
                         <i class="fa-solid fa-star text-amber-400 mr-0.5"></i>Watchlist
                     </button>
+                    <button type="button" id="btn-pitches" onclick="switchMarket('pitches')"
+                            class="px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-800 text-slate-300">
+                        <i class="fa-solid fa-lightbulb text-emerald-400 mr-1"></i>Pitches
+                    </button>
+                    <button type="button" id="btn-superinvestors" onclick="switchMarket('superinvestors')"
+                            class="px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-800 text-slate-300">
+                        <i class="fa-solid fa-user-secret text-indigo-400 mr-1"></i>13F Cloners
+                    </button>
                 </div>
                 <span id="last-updated" class="text-slate-400"></span>
                 <button onclick="refresh()" 
@@ -1116,6 +1124,229 @@
                         </div>
                     </div>
                 </div>
+
+                <!-- 13F Superinvestor Cloners & Substantial Holders Tab -->
+                <div id="superinvestors-view" class="hidden">
+                    <!-- Top Header & Controls -->
+                    <div class="bg-white border rounded-3xl p-4 shadow-sm mb-4 flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                            <div class="flex items-center gap-2">
+                                <h2 class="text-base font-bold text-slate-900 flex items-center gap-2">
+                                    <i class="fa-solid fa-user-secret text-indigo-600"></i>
+                                    Superinvestor 13F Cloners &amp; Substantial Holder Tracker
+                                </h2>
+                                <span id="si-updated-badge" class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200">SEC EDGAR 13F-HR + ASX 603/604</span>
+                            </div>
+                            <p class="text-xs text-slate-500 mt-0.5">
+                                Point-in-time institutional ownership across curated deep-value, contrarian, and capital-cycle managers. Click any investor to inspect their full portfolio, or click any ticker to open deep-value forensics.
+                            </p>
+                        </div>
+                        <div class="flex flex-wrap items-center gap-2">
+                            <div class="relative">
+                                <i class="fa-solid fa-search text-slate-400 text-xs absolute left-3 top-1/2 -translate-y-1/2"></i>
+                                <input id="si-search-input" type="text" placeholder="Search ticker, issuer, or investor..."
+                                       oninput="onSuperinvestorSearch(this.value)"
+                                       class="pl-8 pr-3 py-1.5 text-xs border border-slate-300 rounded-xl w-64 focus:outline-none focus:border-indigo-500" />
+                            </div>
+                            <button type="button" id="btn-si-refresh-sec" onclick="refreshSuperinvestors(true)"
+                                    class="px-3 py-1.5 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-700 text-white flex items-center gap-1.5 shadow-sm">
+                                <i class="fa-solid fa-cloud-arrow-down"></i> Sync SEC 13F Filings
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- KPI Summary Cards -->
+                    <div id="superinvestors-kpi" class="grid grid-cols-1 md:grid-cols-4 gap-3 mb-4"></div>
+
+                    <!-- Master-Detail: Full List of Investors (Left) + Selected Investor Holdings (Right) -->
+                    <div class="grid grid-cols-1 xl:grid-cols-12 gap-4 mb-5">
+                        <!-- Left Column: Full List of Investors -->
+                        <div class="xl:col-span-5 bg-white border rounded-3xl shadow-sm overflow-hidden flex flex-col">
+                            <div class="px-4 py-3 border-b bg-slate-50 flex items-center justify-between">
+                                <div>
+                                    <h3 class="text-xs font-bold uppercase tracking-wider text-slate-700">Tracked Value &amp; Contrarian Managers</h3>
+                                    <p class="text-[11px] text-slate-500">Click an investor row to view their full reported 13F holdings</p>
+                                </div>
+                                <span id="si-managers-count" class="text-xs font-semibold text-indigo-700 bg-indigo-50 px-2.5 py-0.5 rounded-full">0 managers</span>
+                            </div>
+                            <div class="overflow-y-auto max-h-[500px] divide-y divide-slate-100" id="si-managers-list">
+                                <div class="p-6 text-center text-xs text-slate-400">Loading superinvestor roster...</div>
+                            </div>
+                        </div>
+
+                        <!-- Right Column: Selected Investor's Full Reported Holdings -->
+                        <div class="xl:col-span-7 bg-white border rounded-3xl shadow-sm overflow-hidden flex flex-col">
+                            <div class="px-4 py-3 border-b bg-slate-50 flex flex-wrap items-center justify-between gap-2">
+                                <div>
+                                    <div class="flex items-center gap-2">
+                                        <h3 id="si-manager-detail-title" class="text-sm font-bold text-slate-900">Select an investor</h3>
+                                        <a id="si-manager-edgar-link" href="#" target="_blank" rel="noopener"
+                                           class="hidden text-[11px] font-semibold text-indigo-600 hover:underline flex items-center gap-1">
+                                            <span>SEC EDGAR</span>
+                                            <i class="fa-solid fa-arrow-up-right-from-square text-[9px]"></i>
+                                        </a>
+                                    </div>
+                                    <p id="si-manager-detail-sub" class="text-[11px] text-slate-500">Full 13F-HR reported portfolio &amp; quarter-over-quarter activity</p>
+                                </div>
+                                <div class="flex items-center gap-1 bg-slate-200/70 p-1 rounded-xl text-[11px] font-semibold">
+                                    <button type="button" id="si-hold-filter-all" onclick="setSuperinvestorHoldingsFilter('all')"
+                                            class="px-2.5 py-1 rounded-lg bg-white text-slate-800 shadow-sm">Active</button>
+                                    <button type="button" id="si-hold-filter-buys" onclick="setSuperinvestorHoldingsFilter('buys')"
+                                            class="px-2.5 py-1 rounded-lg text-slate-600 hover:text-slate-900">Buys (New/Add)</button>
+                                    <button type="button" id="si-hold-filter-sells" onclick="setSuperinvestorHoldingsFilter('sells')"
+                                            class="px-2.5 py-1 rounded-lg text-slate-600 hover:text-slate-900">Sells (Trim/Exit)</button>
+                                    <button type="button" id="si-hold-filter-exited" onclick="setSuperinvestorHoldingsFilter('exited')"
+                                            class="px-2.5 py-1 rounded-lg text-slate-600 hover:text-slate-900">Exited Only</button>
+                                </div>
+                            </div>
+                            <div class="overflow-x-auto overflow-y-auto max-h-[500px]">
+                                <table class="w-full text-xs">
+                                    <thead class="bg-slate-100/90 border-b sticky top-0 z-10 text-[10px] uppercase tracking-wider text-slate-600">
+                                        <tr>
+                                            <th class="py-2.5 px-3 text-left">Ticker / Issuer</th>
+                                            <th class="py-2.5 px-2 text-right">Port %</th>
+                                            <th class="py-2.5 px-2 text-right">13F Value</th>
+                                            <th class="py-2.5 px-2 text-right">Shares</th>
+                                            <th class="py-2.5 px-2 text-center">QoQ Action</th>
+                                            <th class="py-2.5 px-2 text-right">QoQ Shares Δ</th>
+                                            <th class="py-2.5 px-2 text-right">Price / 52W Low</th>
+                                            <th class="py-2.5 px-3 text-right">P/E • P/B • VQ</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="si-manager-holdings-tbody" class="divide-y divide-slate-100">
+                                        <tr><td colspan="8" class="py-8 text-center text-slate-400">Select an investor on the left to inspect their holdings.</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Bottom Sub-Tabbed Section: Common Holdings | Recent Reported Buys & Sells | ASX Substantial Notices -->
+                    <div class="bg-white border rounded-3xl shadow-sm overflow-hidden">
+                        <div class="px-4 py-3 border-b bg-slate-50 flex flex-wrap items-center justify-between gap-2">
+                            <div class="flex flex-wrap items-center gap-1.5">
+                                <button type="button" id="si-subtab-btn-common" onclick="setSuperinvestorsSubtab('common')"
+                                        class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-indigo-600 text-white shadow-sm flex items-center gap-1.5">
+                                    <i class="fa-solid fa-layer-group"></i> Common / Consensus Holdings
+                                </button>
+                                <button type="button" id="si-subtab-btn-activity" onclick="setSuperinvestorsSubtab('activity')"
+                                        class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-slate-200 text-slate-700 hover:bg-slate-300 flex items-center gap-1.5">
+                                    <i class="fa-solid fa-arrows-Left-right"></i> Recent Reported Buys &amp; Sells
+                                </button>
+                                <button type="button" id="si-subtab-btn-asx" onclick="setSuperinvestorsSubtab('asx')"
+                                        class="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-slate-200 text-slate-700 hover:bg-slate-300 flex items-center gap-1.5">
+                                    <i class="fa-solid fa-file-signature"></i> ASX Substantial Notices (Form 603/604)
+                                </button>
+                            </div>
+                            <div id="si-common-controls" class="flex items-center gap-2 text-xs">
+                                <label class="inline-flex items-center gap-1.5 text-slate-600 cursor-pointer">
+                                    <input type="checkbox" id="si-common-multi-only" checked onchange="setCommonHoldingsMode(this.checked)" class="rounded text-indigo-600" />
+                                    <span class="font-medium">2+ Superinvestors Only (Consensus Overlap)</span>
+                                </label>
+                                <label class="inline-flex items-center gap-1.5 text-slate-600 cursor-pointer ml-2">
+                                    <input type="checkbox" id="si-common-screener-only" onchange="renderSuperinvestorsCommonHoldings()" class="rounded text-teal-600" />
+                                    <span class="font-medium">In Screener Universe Only</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <!-- Subtab 1: Common / Consensus Holdings -->
+                        <div id="si-subtab-common" class="overflow-x-auto max-h-[560px]">
+                            <table class="w-full text-xs">
+                                <thead class="bg-slate-100 border-b sticky top-0 z-10 text-[10px] uppercase tracking-wider text-slate-600">
+                                    <tr>
+                                        <th class="py-2.5 px-3 text-left">Ticker</th>
+                                        <th class="py-2.5 px-3 text-left">Company</th>
+                                        <th class="py-2.5 px-2 text-center"># Cloners</th>
+                                        <th class="py-2.5 px-3 text-left">Superinvestor Holders (Click to Inspect Portfolio)</th>
+                                        <th class="py-2.5 px-2 text-right">Combined Port %</th>
+                                        <th class="py-2.5 px-2 text-right">Max Port %</th>
+                                        <th class="py-2.5 px-2 text-right">Combined 13F $</th>
+                                        <th class="py-2.5 px-2 text-center">Recent QoQ Activity</th>
+                                        <th class="py-2.5 px-2 text-right">Price / +52W Low</th>
+                                        <th class="py-2.5 px-3 text-right">P/E • P/B • VQ</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="si-common-tbody" class="divide-y divide-slate-100"></tbody>
+                            </table>
+                        </div>
+
+                        <!-- Subtab 2: Recent Reported Buys & Sells -->
+                        <div id="si-subtab-activity" class="hidden p-4">
+                            <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                                <!-- Recent Buys (NEW & ADDED) -->
+                                <div class="border rounded-2xl overflow-hidden">
+                                    <div class="px-3.5 py-2.5 bg-emerald-50 border-b border-emerald-100 flex items-center justify-between">
+                                        <div class="font-bold text-xs text-emerald-900 flex items-center gap-1.5">
+                                            <i class="fa-solid fa-circle-arrow-up text-emerald-600"></i>
+                                            Recent Reported Buys (New Initiations &amp; QoQ Additions)
+                                        </div>
+                                        <span id="si-buys-badge" class="text-[11px] font-semibold text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded-full">0</span>
+                                    </div>
+                                    <div class="overflow-x-auto max-h-[500px]">
+                                        <table class="w-full text-xs">
+                                            <thead class="bg-slate-50 border-b sticky top-0 text-[10px] uppercase text-slate-500">
+                                                <tr>
+                                                    <th class="py-2 px-2.5 text-left">Ticker</th>
+                                                    <th class="py-2 px-2 text-left">Investor</th>
+                                                    <th class="py-2 px-2 text-center">Action</th>
+                                                    <th class="py-2 px-2 text-right">Shares Δ%</th>
+                                                    <th class="py-2 px-2 text-right">Port %</th>
+                                                    <th class="py-2 px-2.5 text-right">13F Value</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="si-buys-tbody" class="divide-y divide-slate-100"></tbody>
+                                        </table>
+                                    </div>
+                                </div>
+
+                                <!-- Recent Sells (REDUCED & EXITED) -->
+                                <div class="border rounded-2xl overflow-hidden">
+                                    <div class="px-3.5 py-2.5 bg-rose-50 border-b border-rose-100 flex items-center justify-between">
+                                        <div class="font-bold text-xs text-rose-900 flex items-center gap-1.5">
+                                            <i class="fa-solid fa-circle-arrow-down text-rose-600"></i>
+                                            Recent Reported Sells (QoQ Reductions &amp; Full Exits)
+                                        </div>
+                                        <span id="si-sells-badge" class="text-[11px] font-semibold text-rose-800 bg-rose-100 px-2 py-0.5 rounded-full">0</span>
+                                    </div>
+                                    <div class="overflow-x-auto max-h-[500px]">
+                                        <table class="w-full text-xs">
+                                            <thead class="bg-slate-50 border-b sticky top-0 text-[10px] uppercase text-slate-500">
+                                                <tr>
+                                                    <th class="py-2 px-2.5 text-left">Ticker</th>
+                                                    <th class="py-2 px-2 text-left">Investor</th>
+                                                    <th class="py-2 px-2 text-center">Action</th>
+                                                    <th class="py-2 px-2 text-right">Shares Δ%</th>
+                                                    <th class="py-2 px-2 text-right">Port %</th>
+                                                    <th class="py-2 px-2.5 text-right">Prior / Cur Val</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="si-sells-tbody" class="divide-y divide-slate-100"></tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Subtab 3: ASX Substantial Holder Notices -->
+                        <div id="si-subtab-asx" class="hidden overflow-x-auto max-h-[520px]">
+                            <table class="w-full text-xs">
+                                <thead class="bg-slate-100 border-b sticky top-0 z-10 text-[10px] uppercase tracking-wider text-slate-600">
+                                    <tr>
+                                        <th class="py-2.5 px-3 text-left">Date</th>
+                                        <th class="py-2.5 px-3 text-left">ASX Ticker</th>
+                                        <th class="py-2.5 px-3 text-left">Company</th>
+                                        <th class="py-2.5 px-2 text-center">Notice Type</th>
+                                        <th class="py-2.5 px-3 text-left">Headline / Filing Link</th>
+                                        <th class="py-2.5 px-2 text-right">Price / +52W Low</th>
+                                        <th class="py-2.5 px-3 text-right">P/E • P/B • VQ</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="si-asx-tbody" class="divide-y divide-slate-100"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
             </main>
         </div>
     </div>
@@ -1889,7 +2120,7 @@
 
         function isFullTableView(market) {
             const m = market || currentMarket;
-            return m === 'business' || m === 'watchlist';
+            return m === 'business' || m === 'watchlist' || m === 'pitches';
         }
 
         function showDriverCols() {
@@ -2119,11 +2350,11 @@
         }
 
         function detailMarketFor(stock) {
-            // Route /api/stock correctly when viewing Watchlist tab
-            if (currentMarket === 'watchlist' && stock && stock._market) {
+            // Route /api/stock correctly when viewing Watchlist, Pitches, or Superinvestors tab
+            if ((currentMarket === 'watchlist' || currentMarket === 'pitches' || currentMarket === 'superinvestors') && stock && stock._market) {
                 return stock._market;
             }
-            if (currentMarket === 'watchlist' && stock && stock.ticker) {
+            if ((currentMarket === 'watchlist' || currentMarket === 'pitches' || currentMarket === 'superinvestors') && stock && stock.ticker) {
                 const t = String(stock.ticker).toUpperCase();
                 if (t.endsWith('.AX')) return 'asx';
                 if (t.includes('.')) return 'business';
@@ -2834,8 +3065,26 @@
             if (col === 'driver.ret_3m') return stock.driver?.ret_3m ?? null;
             if (col === 'driver.crack_last') return stock.driver?.crack?.last ?? null;
             if (col === 'driver.display') return (stock.driver?.display || '').toString();
-            if (col === 'sector' || col === 'name' || col === 'ticker' || col === 'buyback_source' || col === 'buyback_date') {
-                return (stock[col] || '').toString();
+            if (col === 'sector' || col === 'name' || col === 'ticker' || col === 'buyback_source' || col === 'buyback_date' || col === 'pitch_date' || col === 'primary_thesis_type') {
+                return (stock[col] || stock.metrics?.[col] || '').toString();
+            }
+            const pitchForensicCols = [
+                'price_at_pitch', 'ret_to_now_pct', 'ret_1m_pct', 'ret_3m_pct', 'ret_6m_pct', 'ret_12m_pct',
+                'sbc_adjusted_fcf_yield', 'short_pct_float', 'short_ratio', 'short_mom_change_pct',
+                'piotroski_f_score', 'shares_yoy_change_pct', 'shares_3y_cagr_pct', 'capex_to_da_ratio',
+                'sector_capex_to_da_median', 'inventory_to_sales_delta_pct', 'net_debt_to_ebitda',
+                'current_ratio_yoy_delta', 'gross_margin_yoy_delta', 'interest_coverage',
+                'sloan_accrual_pct_mcap', 'upside_to_low_target_pct', 'analyst_count',
+                'eps_rev_30d_pct', 'eps_rev_90d_pct', 'cloner_holder_count', 'cloner_new_position_flag',
+                'cloner_max_weight_pct', 'median_dollar_vol_20d', 'max_pos_usd_5pct_adv',
+                'suggested_position_weight_pct', 'volatility_60d_ann_pct', 'max_drawdown_1y_pct',
+                'ai_conviction_score',
+            ];
+            if (pitchForensicCols.includes(col)) {
+                for (const src of [stock[col], stock.metrics?.[col]]) {
+                    if (src != null && src !== '' && !isNaN(src)) return Number(src);
+                }
+                return null;
             }
             if (col === 'annual_buyback_pct') {
                 const v = stock.annual_buyback_pct ?? stock.metrics?.annual_buyback_pct;
@@ -5425,6 +5674,27 @@
                     </div>
                     ${breadthKpiCards(br)}
                 `;
+            } else if (isFull && currentMarket === 'pitches') {
+                const withRet = visible.filter(x => x.ret_to_now_pct != null && !isNaN(Number(x.ret_to_now_pct)));
+                const avgRet = withRet.length
+                    ? (withRet.reduce((a, b) => a + Number(b.ret_to_now_pct), 0) / withRet.length)
+                    : null;
+                const winners = withRet.filter(x => Number(x.ret_to_now_pct) > 0).length;
+                const retCls = avgRet == null ? 'text-slate-600' : (avgRet >= 0 ? 'text-emerald-700' : 'text-rose-600');
+                const avgRetStr = avgRet == null ? '—' : ((avgRet > 0 ? '+' : '') + avgRet.toFixed(1) + '%');
+                el.innerHTML = `
+                    <div class="bg-white border rounded-3xl p-4">
+                        <div class="text-xs text-slate-500">PITCHED STOCKS</div>
+                        <div class="text-4xl font-bold">${visible.length}</div>
+                        <div class="text-[10px] text-slate-400">Daily Stock Pitcher ledger · ${winners}/${withRet.length} positive</div>
+                    </div>
+                    <div class="bg-white border rounded-3xl p-4">
+                        <div class="text-xs text-slate-500">AVG RETURN SINCE PITCH</div>
+                        <div class="text-4xl font-bold ${retCls}">${avgRetStr}</div>
+                        <div class="text-[10px] text-slate-400">${withRet.length} tracked pitches</div>
+                    </div>
+                    ${breadthKpiCards(br)}
+                `;
             } else if (isFull && isBusiness) {
                 el.innerHTML = `
                     <div class="bg-white border rounded-3xl p-4">
@@ -5465,12 +5735,38 @@
 
             const isFull = isFullTableView(market);
             const isBusiness = market === 'business';
+            const isPitches = market === 'pitches';
             const isBuybacks = isBuybacksList();
             const showBuybackCols = showBuybackFeatures();
             const visible = getVisibleStocks();
 
             // Dynamic header (with data-col for sorting)
             if (isFull) {
+                const pitchCols = isPitches ? `
+                    <th data-col="pitch_date" class="text-left p-3" title="Date pitched by Daily Stock Pitcher">Pitch Date</th>
+                    <th data-col="primary_thesis_type" class="text-center p-3" title="Primary Deep-Value Thesis Archetype (cigar_butt, capital_cycle, spinoff_reorg, compounder)">Thesis</th>
+                    <th data-col="ai_conviction_score" class="text-right p-3" title="AI Deep-Value Conviction Score (0-100) combining valuation, F-Score, SBC-Adj FCF yield &amp; 13F backing">AI Conv</th>
+                    <th data-col="price_at_pitch" class="text-right p-3" title="Price when pitched">Pitch Price</th>
+                    <th data-col="ret_to_now_pct" class="text-right p-3" title="Realized return since pitch date">Ret Since Pitch</th>
+                    <th data-col="forward_pe" class="text-right p-3" title="Forward P/E">Fwd P/E</th>
+                    <th data-col="eps_rev_30d_pct" class="text-right p-3" title="30-day Forward EPS Estimate Revision % (hover for 90d revision)">EPS Rev 30d</th>
+                    <th data-col="sbc_adjusted_fcf_yield" class="text-right p-3" title="(FCF - Stock-Based Comp) / Market Cap">SBC-Adj FCF%</th>
+                    <th data-col="cloner_holder_count" class="text-center p-3" title="Superinvestor 13F / ASX Substantial Holders count (hover for manager names &amp; weights)">13F Cloners</th>
+                    <th data-col="short_pct_float" class="text-right p-3" title="Short interest % of float (hover for Days to Cover)">Short %</th>
+                    <th data-col="piotroski_f_score" class="text-center p-3" title="Piotroski F-Score (0-9 financial strength)">F-Score</th>
+                    <th data-col="shares_yoy_change_pct" class="text-right p-3" title="1-Year net change in shares outstanding">Shares 1Y Δ</th>
+                    <th data-col="shares_3y_cagr_pct" class="text-right p-3" title="3-Year annualized share count CAGR %">Shares 3Y CAGR</th>
+                    <th data-col="share_count_5y_change_pct" class="text-right p-3" title="5-Year net change in diluted shares (SEC EDGAR)">Shares 5Y Δ</th>
+                    <th data-col="capex_to_da_ratio" class="text-right p-3" title="|Capex| / D&amp;A (&lt;0.8x = supply starvation; hover for sector median)">Capex/D&amp;A</th>
+                    <th data-col="inventory_to_sales_delta_pct" class="text-right p-3" title="Inventory YoY% minus Revenue YoY% (&lt;0% = lean channel; &gt;+15% = channel stuffing warning)">Inv-Sales Δ</th>
+                    <th data-col="net_debt_to_ebitda" class="text-right p-3" title="Net Debt / EBITDA (&lt;0x = net cash)">NetDebt/EBITDA</th>
+                    <th data-col="interest_coverage" class="text-right p-3" title="EBIT / Interest Expense">Int Cov</th>
+                    <th data-col="sloan_accrual_pct_mcap" class="text-right p-3" title="(Net Income - OCF) / Market Cap (negative = high cash conversion)">Sloan Accr%</th>
+                    <th data-col="analyst_count" class="text-right p-3" title="Covering analysts (hover for upside to lowest street target)">Analysts</th>
+                    <th data-col="median_dollar_vol_20d" class="text-right p-3" title="20-day median daily dollar volume">20d $Vol</th>
+                    <th data-col="max_pos_usd_5pct_adv" class="text-right p-3" title="Max position size at 5% of 20d ADV without market impact (hover for suggested portfolio weight %)">Size Cap (5% ADV)</th>
+                    <th data-col="volatility_60d_ann_pct" class="text-right p-3" title="60-day annualized volatility %">Vol 60d</th>
+                ` : '';
                 const buybackCols = showBuybackCols ? `
                     <th data-col="buyback_source" class="text-left p-3">Source</th>
                     <th data-col="buyback_date" class="text-left p-3" title="Last completed purchase period (monthly/fiscal-month). Not authorization end dates.">Latest Buyback</th>
@@ -5499,6 +5795,7 @@
                     <th data-col="name" class="text-left p-3">Company</th>
                     <th data-col="sector" class="text-left">Sector</th>
                     <th data-col="current_price" class="text-right">Price</th>
+                    ${pitchCols}
                     ${driverCols}
                     <th data-col="pe_5y_avg_earnings" class="text-right p-3" title="Price ÷ 5-year average annual EPS">P / 5Y avg earn</th>
                     <th data-col="market_cap" class="text-right">Mkt Cap</th>
@@ -5651,6 +5948,101 @@
                         ? `<span class="ml-0.5 text-[9px] px-1 py-0.5 rounded bg-sky-100 text-sky-900" title="${escapeHtml(costDisp || 'unit cost')}${costQ ? ' · pilot Q1' : ''}">C${costQ ? '1' : ''}</span>`
                         : '';
                     const d = stock.driver;
+                    const pitchCells = isPitches ? (() => {
+                        const pDate = stock.pitch_date ? escapeHtml(String(stock.pitch_date).slice(0, 10)) : '—';
+                        const thesisRaw = (stock.primary_thesis_type || stock.metrics?.primary_thesis_type || 'compounder').toString();
+                        const thesisLabels = {
+                            cigar_butt: ['Cigar Butt', 'bg-amber-100 text-amber-900'],
+                            capital_cycle: ['Cap Cycle', 'bg-orange-100 text-orange-900'],
+                            spinoff_reorg: ['Spinoff/Reorg', 'bg-purple-100 text-purple-900'],
+                            compounder: ['Compounder', 'bg-teal-100 text-teal-900'],
+                        };
+                        const [thLabel, thCls] = thesisLabels[thesisRaw] || ['Deep Value', 'bg-slate-100 text-slate-700'];
+                        const aiConv = getVal(stock, 'ai_conviction_score');
+                        const aiConvStr = aiConv != null ? Number(aiConv).toFixed(1) : '—';
+                        const aiConvCls = aiConv == null ? 'text-slate-400' : (aiConv >= 75 ? 'text-emerald-700 font-bold' : (aiConv >= 60 ? 'text-teal-700 font-semibold' : 'text-slate-600'));
+                        const p0 = getVal(stock, 'price_at_pitch');
+                        const p0Str = p0 ? formatPrice(p0, stock) : '—';
+                        const retNow = getVal(stock, 'ret_to_now_pct');
+                        const retCls = retColorClass(retNow);
+                        const retStr = retNow != null ? fmtSignedPct(retNow, 1) : '—';
+                        const fwdPe = getVal(stock, 'forward_pe');
+                        const fwdPeStr = fwdPe ? Number(fwdPe).toFixed(1) : '—';
+                        const epsR30 = getVal(stock, 'eps_rev_30d_pct');
+                        const epsR90 = getVal(stock, 'eps_rev_90d_pct');
+                        const epsR30Str = epsR30 != null ? fmtSignedPct(epsR30, 1) : '—';
+                        const epsR30Cls = epsR30 == null ? 'text-slate-400' : (epsR30 > 0 ? 'text-emerald-700 font-semibold' : (epsR30 < -2 ? 'text-rose-600' : 'text-slate-700'));
+                        const epsRTip = epsR90 != null ? `90d EPS Revision: ${fmtSignedPct(epsR90, 1)}` : '';
+                        const sbcFcf = getVal(stock, 'sbc_adjusted_fcf_yield');
+                        const sbcFcfStr = sbcFcf != null ? Number(sbcFcf).toFixed(2) + '%' : '—';
+                        const sbcCls = sbcFcf == null ? 'text-slate-400' : (sbcFcf >= 8 ? 'text-emerald-700 font-semibold' : (sbcFcf < 0 ? 'text-rose-600' : 'text-slate-700'));
+                        const clonerCnt = getVal(stock, 'cloner_holder_count') || 0;
+                        const clonerNew = getVal(stock, 'cloner_new_position_flag') || 0;
+                        const clonerSum = (stock.cloner_holders_summary || stock.metrics?.cloner_holders_summary || '').toString();
+                        const clonerBadge = clonerCnt > 0
+                            ? `<span class="text-[10px] px-1.5 py-0.5 rounded font-semibold ${clonerNew ? 'bg-emerald-100 text-emerald-900' : 'bg-indigo-100 text-indigo-900'}" title="${escapeHtml(clonerSum)}">${clonerCnt}${clonerNew ? '★' : ''}</span>`
+                            : '<span class="text-slate-400">0</span>';
+                        const shortPct = getVal(stock, 'short_pct_float');
+                        const shortRatio = getVal(stock, 'short_ratio');
+                        const shortStr = shortPct != null ? Number(shortPct).toFixed(1) + '%' : '—';
+                        const shortTip = shortRatio != null ? `Days to cover: ${Number(shortRatio).toFixed(1)}d` : '';
+                        const fScore = getVal(stock, 'piotroski_f_score');
+                        const fStr = fScore != null ? `${fScore}/9` : '—';
+                        const fCls = fScore == null ? 'text-slate-400' : (fScore >= 7 ? 'bg-emerald-100 text-emerald-800' : (fScore <= 3 ? 'bg-rose-100 text-rose-800' : 'bg-slate-100 text-slate-700'));
+                        const sh1y = getVal(stock, 'shares_yoy_change_pct');
+                        const sh3y = getVal(stock, 'shares_3y_cagr_pct');
+                        const sh5y = getVal(stock, 'share_count_5y_change_pct');
+                        const capDa = getVal(stock, 'capex_to_da_ratio');
+                        const secCapDa = getVal(stock, 'sector_capex_to_da_median');
+                        const capDaStr = capDa != null ? Number(capDa).toFixed(2) + 'x' : '—';
+                        const capDaTip = secCapDa != null ? `Sector median Capex/D&A: ${Number(secCapDa).toFixed(2)}x` : '';
+                        const invDelta = getVal(stock, 'inventory_to_sales_delta_pct');
+                        const invDeltaStr = invDelta != null ? fmtSignedPct(invDelta, 1) : '—';
+                        const invDeltaCls = invDelta == null ? 'text-slate-400' : (invDelta <= 0 ? 'text-emerald-700' : (invDelta >= 15 ? 'text-rose-600 font-semibold' : 'text-slate-700'));
+                        const ndEbitda = getVal(stock, 'net_debt_to_ebitda');
+                        const ndEbitdaStr = ndEbitda != null ? Number(ndEbitda).toFixed(2) + 'x' : '—';
+                        const ndEbitdaCls = ndEbitda == null ? 'text-slate-400' : (ndEbitda <= 0 ? 'text-emerald-700 font-medium' : (ndEbitda >= 3.5 ? 'text-rose-600' : 'text-slate-700'));
+                        const intCov = getVal(stock, 'interest_coverage');
+                        const intCovStr = intCov != null ? Number(intCov).toFixed(1) + 'x' : '—';
+                        const sloan = getVal(stock, 'sloan_accrual_pct_mcap');
+                        const sloanStr = sloan != null ? fmtSignedPct(sloan, 1) : '—';
+                        const analysts = getVal(stock, 'analyst_count');
+                        const lowUpside = getVal(stock, 'upside_to_low_target_pct');
+                        const analystTip = lowUpside != null ? `Upside to lowest street target: ${fmtSignedPct(lowUpside, 1)}` : '';
+                        const dvol = getVal(stock, 'median_dollar_vol_20d');
+                        const dvolStr = dvol ? formatMoney(dvol, getStockCurrency(stock), { compact: true }) : '—';
+                        const maxPos5 = getVal(stock, 'max_pos_usd_5pct_adv');
+                        const sugW = getVal(stock, 'suggested_position_weight_pct');
+                        const maxPosStr = maxPos5 ? formatMoney(maxPos5, getStockCurrency(stock), { compact: true }) : '—';
+                        const maxPosTip = sugW != null ? `Suggested volatility-adjusted portfolio weight: ${Number(sugW).toFixed(2)}%` : '';
+                        const vol60 = getVal(stock, 'volatility_60d_ann_pct');
+                        const vol60Str = vol60 != null ? Number(vol60).toFixed(1) + '%' : '—';
+                        return `
+                            <td class="p-3 text-xs text-slate-600 whitespace-nowrap">${pDate}</td>
+                            <td class="p-3 text-center whitespace-nowrap"><span class="text-[10px] px-1.5 py-0.5 rounded font-medium ${thCls}">${escapeHtml(thLabel)}</span></td>
+                            <td class="p-3 text-right tabular-nums ${aiConvCls}">${aiConvStr}</td>
+                            <td class="p-3 text-right tabular-nums text-slate-600">${p0Str}</td>
+                            <td class="p-3 text-right tabular-nums font-semibold ${retCls}">${retStr}</td>
+                            <td class="p-3 text-right tabular-nums text-slate-700">${fwdPeStr}</td>
+                            <td class="p-3 text-right tabular-nums ${epsR30Cls}" title="${escapeHtml(epsRTip)}">${epsR30Str}</td>
+                            <td class="p-3 text-right tabular-nums ${sbcCls}">${sbcFcfStr}</td>
+                            <td class="p-3 text-center">${clonerBadge}</td>
+                            <td class="p-3 text-right tabular-nums text-slate-700" title="${escapeHtml(shortTip)}">${shortStr}</td>
+                            <td class="p-3 text-center"><span class="text-[10px] px-1.5 py-0.5 rounded font-semibold ${fCls}">${fStr}</span></td>
+                            <td class="p-3 text-right tabular-nums font-medium ${shareChangeColorClass(sh1y)}">${formatPctChange(sh1y)}</td>
+                            <td class="p-3 text-right tabular-nums font-medium ${shareChangeColorClass(sh3y)}">${formatPctChange(sh3y)}</td>
+                            <td class="p-3 text-right tabular-nums font-medium ${shareChangeColorClass(sh5y)}">${formatPctChange(sh5y)}</td>
+                            <td class="p-3 text-right tabular-nums text-slate-700" title="${escapeHtml(capDaTip)}">${capDaStr}</td>
+                            <td class="p-3 text-right tabular-nums ${invDeltaCls}">${invDeltaStr}</td>
+                            <td class="p-3 text-right tabular-nums ${ndEbitdaCls}">${ndEbitdaStr}</td>
+                            <td class="p-3 text-right tabular-nums text-slate-700">${intCovStr}</td>
+                            <td class="p-3 text-right tabular-nums text-slate-700">${sloanStr}</td>
+                            <td class="p-3 text-right tabular-nums text-slate-600" title="${escapeHtml(analystTip)}">${analysts != null ? analysts : '—'}</td>
+                            <td class="p-3 text-right tabular-nums text-slate-600">${dvolStr}</td>
+                            <td class="p-3 text-right tabular-nums text-slate-600" title="${escapeHtml(maxPosTip)}">${maxPosStr}</td>
+                            <td class="p-3 text-right tabular-nums text-slate-600">${vol60Str}</td>
+                        `;
+                    })() : '';
                     const driverCells = showDriverCols() ? `
                         <td class="p-3 text-xs text-slate-600">${d ? escapeHtml(d.display || d.primary || '') : '—'}</td>
                         <td class="p-3 text-right tabular-nums" title="${d && d.last_date ? escapeHtml(d.last_date) : ''}">${d && d.last != null ? Number(d.last).toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—'}</td>
@@ -5667,6 +6059,7 @@
                         <td class="col-company${pendingClass}">${escapeHtml(stock.name)}${stock._pending_yf ? ' <span class="text-[9px] text-amber-600">pending</span>' : ''}</td>
                         <td class="text-xs text-slate-500">${escapeHtml(stock.sector || '')}</td>
                         <td class="text-right font-medium">${priceStr}</td>
+                        ${pitchCells}
                         ${driverCells}
                         <td class="text-right text-slate-600" title="Price ÷ 5-year average annual EPS">${pe5yAvgStr}${formatZBadge(stock, 'pe_5y_avg_earnings')}</td>
                         <td class="text-right text-slate-600">${mcapStr}</td>
@@ -5733,6 +6126,8 @@
             if (countEl) {
                 if (market === 'watchlist' && total === 0) {
                     countEl.textContent = 'Watchlist empty — star any stock on Lists / ASX / US to add';
+                } else if (market === 'pitches' && total === 0) {
+                    countEl.textContent = 'No pitched stocks logged yet — Daily Stock Pitcher briefs appear here automatically';
                 } else {
                     countEl.textContent = (shown === total) ? `${total} stocks shown` : `${shown}/${total} stocks shown`;
                 }
@@ -7362,13 +7757,18 @@
             if (btnCmd) btnCmd.className = m === 'commodities' ? active : inactive;
             const btnWl = document.getElementById('btn-watchlist');
             if (btnWl) btnWl.className = m === 'watchlist' ? active : inactive;
+            const btnPitches = document.getElementById('btn-pitches');
+            if (btnPitches) btnPitches.className = m === 'pitches' ? active : inactive;
+            const btnSi = document.getElementById('btn-superinvestors');
+            if (btnSi) btnSi.className = m === 'superinvestors' ? active : inactive;
         }
 
         function setSpecialViewVisible(which) {
-            // which: null | 'indices' | 'commodities'
+            // which: null | 'indices' | 'commodities' | 'superinvestors'
             const stocksView = document.getElementById('stocks-view');
             const indicesView = document.getElementById('indices-view');
             const cmdtyView = document.getElementById('commodities-view');
+            const siView = document.getElementById('superinvestors-view');
             const filters = document.getElementById('filters-sidebar');
             const biz = document.getElementById('business-controls');
             const kpi = document.getElementById('kpi-row');
@@ -7376,6 +7776,7 @@
             if (stocksView) stocksView.classList.toggle('hidden', special);
             if (indicesView) indicesView.classList.toggle('hidden', which !== 'indices');
             if (cmdtyView) cmdtyView.classList.toggle('hidden', which !== 'commodities');
+            if (siView) siView.classList.toggle('hidden', which !== 'superinvestors');
             if (filters) filters.classList.toggle('hidden', special);
             if (biz) biz.classList.toggle('hidden', special);
             if (kpi) kpi.classList.toggle('hidden', special);
@@ -8241,6 +8642,540 @@
             });
         }
 
+        let superinvestorsData = null;
+        let selectedSuperinvestorId = null;
+        let superinvestorHoldingsFilter = 'all'; // 'all' | 'buys' | 'sells' | 'exited'
+        let superinvestorsSubtab = 'common';     // 'common' | 'activity' | 'asx'
+        let superinvestorSearchQuery = '';
+        let commonHoldingsMultiOnly = true;
+
+        function fmtUsdCompact(v) {
+            const n = Number(v);
+            if (!Number.isFinite(n) || n <= 0) return '—';
+            if (n >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
+            if (n >= 1e6) return '$' + (n / 1e6).toFixed(1) + 'M';
+            if (n >= 1e3) return '$' + (n / 1e3).toFixed(0) + 'K';
+            return '$' + n.toFixed(0);
+        }
+
+        function fmtSharesCompact(v) {
+            const n = Number(v);
+            if (!Number.isFinite(n) || n <= 0) return '—';
+            if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+            if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+            return n.toLocaleString();
+        }
+
+        function renderQoqActionBadge(action) {
+            const a = String(action || 'UNCHANGED').toUpperCase();
+            if (a === 'NEW') {
+                return '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">NEW BUY</span>';
+            }
+            if (a === 'ADDED') {
+                return '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-teal-100 text-teal-800 border border-teal-200">ADDED</span>';
+            }
+            if (a === 'REDUCED') {
+                return '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200">TRIMMED</span>';
+            }
+            if (a === 'EXITED') {
+                return '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-300">SOLD OUT</span>';
+            }
+            return '<span class="px-2 py-0.5 rounded-full text-[10px] font-medium bg-slate-100 text-slate-600">HELD</span>';
+        }
+
+        function renderScreenerMetricsCell(row) {
+            if (!row || !row.in_screener) {
+                return '<span class="text-[10px] text-slate-400">Not in cache</span>';
+            }
+            const pe = row.pe != null && Number.isFinite(Number(row.pe)) ? Number(row.pe).toFixed(1) + 'x' : '—';
+            const pb = row.pb != null && Number.isFinite(Number(row.pb)) ? Number(row.pb).toFixed(2) + 'x' : '—';
+            const vq = row.vq_score != null && Number.isFinite(Number(row.vq_score)) ? Math.round(Number(row.vq_score)) : '—';
+            const vqCls = (row.vq_score >= 70) ? 'bg-emerald-100 text-emerald-800' : (row.vq_score >= 50 ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-600');
+            return `<div class="inline-flex items-center gap-1.5 text-[11px]">
+                <span class="text-slate-700" title="Trailing P/E">PE <b>${pe}</b></span>
+                <span class="text-slate-400">•</span>
+                <span class="text-slate-700" title="Price / Book">PB <b>${pb}</b></span>
+                <span class="px-1.5 py-0.5 rounded font-bold text-[10px] ${vqCls}" title="Value-Quality Score">VQ ${vq}</span>
+            </div>`;
+        }
+
+        function renderPrice52wCell(row) {
+            if (!row || row.current_price == null) return '<span class="text-slate-400">—</span>';
+            const p = '$' + Number(row.current_price).toFixed(2);
+            if (row.pct_from_52w_low == null) return `<span class="font-semibold text-slate-800">${p}</span>`;
+            const pct = Number(row.pct_from_52w_low);
+            const cls = pct <= 15 ? 'text-emerald-600 font-bold' : (pct <= 30 ? 'text-teal-600 font-semibold' : 'text-slate-500');
+            return `<div>
+                <div class="font-semibold text-slate-800">${p}</div>
+                <div class="text-[10px] ${cls}">+${pct.toFixed(1)}% vs 52wL</div>
+            </div>`;
+        }
+
+        async function loadSuperinvestorsTab(forceRefresh = false) {
+            const kpiEl = document.getElementById('superinvestors-kpi');
+            if (!superinvestorsData && kpiEl) {
+                kpiEl.innerHTML = `<div class="col-span-4 bg-white border rounded-2xl p-6 text-center text-xs text-slate-500">
+                    <i class="fa-solid fa-spinner fa-spin mr-2 text-indigo-600"></i>Loading Superinvestor 13F filings and consensus holdings...
+                </div>`;
+            }
+            try {
+                const r = await apiFetch('/api/superinvestors');
+                const j = await r.json();
+                if (j && j.ok) {
+                    superinvestorsData = j;
+                    const managers = j.managers || [];
+                    if (!selectedSuperinvestorId && managers.length) {
+                        const withHoldings = managers.find(m => (m.active_positions_count || 0) > 0);
+                        selectedSuperinvestorId = (withHoldings || managers[0]).id;
+                    }
+                    renderSuperinvestorsTab();
+                    const lu = document.getElementById('last-updated');
+                    if (lu) lu.textContent = '13F Superinvestor Cloners (' + (managers.length) + ' managers)';
+                }
+            } catch (e) {
+                console.error('Failed to load superinvestors tab:', e);
+                if (kpiEl) {
+                    kpiEl.innerHTML = `<div class="col-span-4 bg-rose-50 border border-rose-200 rounded-2xl p-4 text-xs text-rose-700">
+                        Failed to load Superinvestor 13F data: ${escapeHtml(String(e))}
+                    </div>`;
+                }
+            }
+        }
+
+        async function refreshSuperinvestors(fetchSec = true) {
+            const btn = document.getElementById('btn-si-refresh-sec');
+            const origHtml = btn ? btn.innerHTML : '';
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Syncing SEC EDGAR 13Fs...';
+            }
+            try {
+                const r = await apiFetch('/api/superinvestors/refresh', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ fetch_sec: !!fetchSec }),
+                });
+                const j = await r.json();
+                if (j && j.ok) {
+                    superinvestorsData = j;
+                    renderSuperinvestorsTab();
+                }
+            } catch (e) {
+                console.error('Error refreshing superinvestor 13Fs:', e);
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = origHtml;
+                }
+            }
+        }
+
+        function renderSuperinvestorsTab() {
+            if (!superinvestorsData) return;
+            renderSuperinvestorsKpi();
+            renderSuperinvestorsManagersList();
+            renderSelectedSuperinvestorHoldings();
+            renderSuperinvestorsCommonHoldings();
+            renderSuperinvestorsActivity();
+            renderSuperinvestorsAsxNotices();
+        }
+
+        function renderSuperinvestorsKpi() {
+            const el = document.getElementById('superinvestors-kpi');
+            if (!el || !superinvestorsData) return;
+            const kpi = superinvestorsData.kpi || {};
+            el.innerHTML = `
+                <div class="bg-white border rounded-2xl p-3.5 shadow-sm">
+                    <div class="text-[10px] font-bold uppercase tracking-wider text-slate-400">Tracked Value Cloners</div>
+                    <div class="text-xl font-black text-slate-900 mt-0.5">${kpi.managers_with_filings || 0} <span class="text-xs font-normal text-slate-500">/ ${kpi.managers_tracked || 0} managers</span></div>
+                    <div class="text-[11px] text-indigo-600 font-semibold mt-1">Combined 13F Equity: ${fmtUsdCompact(kpi.combined_13f_aum_usd)}</div>
+                </div>
+                <div class="bg-white border rounded-2xl p-3.5 shadow-sm">
+                    <div class="text-[10px] font-bold uppercase tracking-wider text-slate-400">Consensus Overlap Stocks</div>
+                    <div class="text-xl font-black text-indigo-700 mt-0.5">${kpi.consensus_stocks_count || 0} <span class="text-xs font-normal text-slate-500">held by 2+ cloners</span></div>
+                    <div class="text-[11px] text-slate-500 mt-1">${kpi.total_unique_tickers || 0} unique US tickers across ${kpi.total_active_positions || 0} positions</div>
+                </div>
+                <div class="bg-white border rounded-2xl p-3.5 shadow-sm">
+                    <div class="text-[10px] font-bold uppercase tracking-wider text-slate-400">Recent Reported Buys (QoQ)</div>
+                    <div class="text-xl font-black text-emerald-600 mt-0.5">${kpi.recent_buys_count || 0} <span class="text-xs font-normal text-slate-500">New + Added stakes</span></div>
+                    <div class="text-[11px] text-emerald-700 mt-1">Latest 13F-HR vs Prior Quarter</div>
+                </div>
+                <div class="bg-white border rounded-2xl p-3.5 shadow-sm">
+                    <div class="text-[10px] font-bold uppercase tracking-wider text-slate-400">Recent Sells &amp; Exits (QoQ)</div>
+                    <div class="text-xl font-black text-rose-600 mt-0.5">${kpi.recent_sells_count || 0} <span class="text-xs font-normal text-slate-500">Trimmed + Exited</span></div>
+                    <div class="text-[11px] text-slate-500 mt-1">Plus ${kpi.asx_notices_180d_count || 0} ASX Form 603/604 notices (180d)</div>
+                </div>
+            `;
+        }
+
+        function renderSuperinvestorsManagersList() {
+            const listEl = document.getElementById('si-managers-list');
+            const countEl = document.getElementById('si-managers-count');
+            if (!listEl || !superinvestorsData) return;
+            const q = (superinvestorSearchQuery || '').trim().toLowerCase();
+            const managers = (superinvestorsData.managers || []).filter(m => {
+                if (!q) return true;
+                if ((m.name || '').toLowerCase().includes(q) || (m.style || '').toLowerCase().includes(q)) return true;
+                const holdings = (superinvestorsData.holdings_by_manager || {})[m.id] || [];
+                return holdings.some(h => (h.ticker || '').toLowerCase().includes(q) || (h.issuer_name || '').toLowerCase().includes(q));
+            });
+            if (countEl) countEl.textContent = `${managers.length} managers`;
+            if (!managers.length) {
+                listEl.innerHTML = `<div class="p-6 text-center text-xs text-slate-400">No investors match "${escapeHtml(q)}".</div>`;
+                return;
+            }
+            listEl.innerHTML = managers.map(m => {
+                const isSelected = m.id === selectedSuperinvestorId;
+                const rowCls = isSelected
+                    ? 'bg-indigo-50/90 border-l-4 border-l-indigo-600 px-4 py-3 cursor-pointer transition'
+                    : 'hover:bg-slate-50 px-4 py-3 cursor-pointer transition';
+                const qc = m.qoq_counts || {};
+                const topBadges = (m.top_holdings || []).slice(0, 5).map(th => {
+                    const t = th.ticker || '—';
+                    const w = th.weight != null ? Number(th.weight).toFixed(1) + '%' : '';
+                    return `<span class="px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 font-mono text-[10px] border border-slate-200">${escapeHtml(t)} <span class="text-slate-400">${w}</span></span>`;
+                }).join(' ');
+                return `
+                    <div class="${rowCls}" onclick="selectSuperinvestor('${escapeHtml(m.id)}')">
+                        <div class="flex items-start justify-between gap-2">
+                            <div>
+                                <div class="font-bold text-xs text-slate-900 flex items-center gap-1.5">
+                                    <span>${escapeHtml(m.name)}</span>
+                                    ${isSelected ? '<i class="fa-solid fa-chevron-right text-[10px] text-indigo-600"></i>' : ''}
+                                </div>
+                                <div class="text-[10px] text-slate-500">${escapeHtml(m.style || '')} • CIK ${escapeHtml(m.cik || '')}</div>
+                            </div>
+                            <div class="text-right shrink-0">
+                                <div class="font-bold text-xs text-indigo-700">${fmtUsdCompact(m.total_value_usd)}</div>
+                                <div class="text-[10px] text-slate-500">${m.active_positions_count || 0} pos • ${escapeHtml(m.report_date || 'N/A')}</div>
+                            </div>
+                        </div>
+                        <div class="mt-2 flex flex-wrap items-center justify-between gap-1">
+                            <div class="flex flex-wrap gap-1">${topBadges || '<span class="text-[10px] text-slate-400">No active 13F positions</span>'}</div>
+                            <div class="flex items-center gap-1 text-[10px] font-semibold">
+                                ${(qc.new || 0) > 0 ? `<span class="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800" title="New Initiations">+${qc.new} new</span>` : ''}
+                                ${(qc.added || 0) > 0 ? `<span class="px-1.5 py-0.5 rounded bg-teal-100 text-teal-800" title="Added Positions">▲${qc.added}</span>` : ''}
+                                ${(qc.reduced || 0) > 0 ? `<span class="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800" title="Trimmed Positions">▼${qc.reduced}</span>` : ''}
+                                ${(qc.exited || 0) > 0 ? `<span class="px-1.5 py-0.5 rounded bg-rose-100 text-rose-800" title="Sold Out">✕${qc.exited}</span>` : ''}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function selectSuperinvestor(managerId) {
+            selectedSuperinvestorId = managerId;
+            renderSuperinvestorsManagersList();
+            renderSelectedSuperinvestorHoldings();
+        }
+
+        function setSuperinvestorHoldingsFilter(mode) {
+            superinvestorHoldingsFilter = mode;
+            const modes = ['all', 'buys', 'sells', 'exited'];
+            modes.forEach(m => {
+                const btn = document.getElementById('si-hold-filter-' + m);
+                if (!btn) return;
+                btn.className = (m === mode)
+                    ? 'px-2.5 py-1 rounded-lg bg-white text-slate-800 shadow-sm'
+                    : 'px-2.5 py-1 rounded-lg text-slate-600 hover:text-slate-900';
+            });
+            renderSelectedSuperinvestorHoldings();
+        }
+
+        function renderSelectedSuperinvestorHoldings() {
+            const tbody = document.getElementById('si-manager-holdings-tbody');
+            const titleEl = document.getElementById('si-manager-detail-title');
+            const subEl = document.getElementById('si-manager-detail-sub');
+            const edgarEl = document.getElementById('si-manager-edgar-link');
+            if (!tbody || !superinvestorsData) return;
+
+            const managers = superinvestorsData.managers || [];
+            const mgr = managers.find(m => m.id === selectedSuperinvestorId);
+            if (!mgr) {
+                tbody.innerHTML = '<tr><td colspan="8" class="py-8 text-center text-slate-400">Select an investor on the left to inspect their holdings.</td></tr>';
+                return;
+            }
+
+            if (titleEl) titleEl.textContent = `${mgr.name} (${mgr.style || 'Value'})`;
+            if (subEl) {
+                subEl.textContent = `Report Period: ${mgr.report_date || 'N/A'} (Filed ${mgr.filing_date || 'N/A'}) • ${mgr.active_positions_count || 0} Active Positions (${fmtUsdCompact(mgr.total_value_usd)}) • ${mgr.exited_positions_count || 0} Exited QoQ`;
+            }
+            if (edgarEl) {
+                if (mgr.edgar_url) {
+                    edgarEl.href = mgr.edgar_url;
+                    edgarEl.classList.remove('hidden');
+                } else {
+                    edgarEl.classList.add('hidden');
+                }
+            }
+
+            const allHoldings = ((superinvestorsData.holdings_by_manager || {})[mgr.id] || []);
+            const q = (superinvestorSearchQuery || '').trim().toLowerCase();
+            const filtered = allHoldings.filter(h => {
+                const act = String(h.qoq_action || '').toUpperCase();
+                if (superinvestorHoldingsFilter === 'all' && act === 'EXITED') return false;
+                if (superinvestorHoldingsFilter === 'buys' && act !== 'NEW' && act !== 'ADDED') return false;
+                if (superinvestorHoldingsFilter === 'sells' && act !== 'REDUCED' && act !== 'EXITED') return false;
+                if (superinvestorHoldingsFilter === 'exited' && act !== 'EXITED') return false;
+                if (q) {
+                    const matchT = (h.ticker || '').toLowerCase().includes(q);
+                    const matchI = (h.issuer_name || '').toLowerCase().includes(q);
+                    const matchM = (mgr.name || '').toLowerCase().includes(q);
+                    if (!matchT && !matchI && !matchM) return false;
+                }
+                return true;
+            });
+
+            if (!filtered.length) {
+                tbody.innerHTML = `<tr><td colspan="8" class="py-8 text-center text-slate-400">No holdings match the current filter (${escapeHtml(superinvestorHoldingsFilter)}).</td></tr>`;
+                return;
+            }
+
+            tbody.innerHTML = filtered.map(h => {
+                const t = h.ticker || '';
+                const clickableTicker = t
+                    ? `<button type="button" onclick="showModal('${escapeHtml(t)}')" class="font-bold text-indigo-700 hover:underline font-mono">${escapeHtml(t)}</button>`
+                    : `<span class="text-slate-400 font-mono" title="CUSIP ${escapeHtml(h.cusip || '')}">${escapeHtml((h.cusip || '').slice(0, 6) || 'UNMAPPED')}</span>`;
+                const isExited = String(h.qoq_action || '').toUpperCase() === 'EXITED';
+                const weightStr = isExited ? '<span class="text-rose-500 font-semibold">0.00%</span>' : (h.portfolio_weight_pct != null ? Number(h.portfolio_weight_pct).toFixed(2) + '%' : '—');
+                const valStr = isExited
+                    ? `<span class="text-slate-400 line-through" title="Prior quarter value">${fmtUsdCompact(h.prev_value_usd)}</span>`
+                    : fmtUsdCompact(h.value_usd);
+                const shStr = isExited
+                    ? `<span class="text-slate-400 line-through" title="Prior quarter shares">${fmtSharesCompact(h.prev_shares)}</span>`
+                    : fmtSharesCompact(h.shares);
+                let qoqDeltaHtml = '—';
+                if (h.qoq_shares_change_pct != null && Number.isFinite(Number(h.qoq_shares_change_pct))) {
+                    const d = Number(h.qoq_shares_change_pct);
+                    const sign = d > 0 ? '+' : '';
+                    const cls = d > 0 ? 'text-emerald-600 font-semibold' : (d < 0 ? 'text-rose-600 font-semibold' : 'text-slate-400');
+                    qoqDeltaHtml = `<span class="${cls}">${sign}${d.toFixed(1)}%</span>`;
+                } else if (String(h.qoq_action || '').toUpperCase() === 'NEW') {
+                    qoqDeltaHtml = '<span class="text-emerald-600 font-semibold">New Stake</span>';
+                }
+                return `
+                    <tr class="hover:bg-slate-50/90 ${isExited ? 'bg-rose-50/20' : ''}">
+                        <td class="py-2 px-3">
+                            <div class="flex items-center gap-1.5">
+                                ${clickableTicker}
+                                ${h.put_call ? `<span class="px-1 py-0.2 rounded text-[9px] font-bold bg-amber-100 text-amber-800">${escapeHtml(h.put_call)}</span>` : ''}
+                            </div>
+                            <div class="text-[11px] text-slate-500 truncate max-w-[210px]" title="${escapeHtml(h.issuer_name || '')}">${escapeHtml(h.issuer_name || '')}</div>
+                        </td>
+                        <td class="py-2 px-2 text-right font-bold text-slate-800">${weightStr}</td>
+                        <td class="py-2 px-2 text-right text-slate-700">${valStr}</td>
+                        <td class="py-2 px-2 text-right text-slate-600 font-mono text-[11px]">${shStr}</td>
+                        <td class="py-2 px-2 text-center">${renderQoqActionBadge(h.qoq_action)}</td>
+                        <td class="py-2 px-2 text-right">${qoqDeltaHtml}</td>
+                        <td class="py-2 px-2 text-right">${renderPrice52wCell(h)}</td>
+                        <td class="py-2 px-3 text-right">${renderScreenerMetricsCell(h)}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        function setSuperinvestorsSubtab(tab) {
+            superinvestorsSubtab = tab;
+            const tabs = ['common', 'activity', 'asx'];
+            tabs.forEach(t => {
+                const panel = document.getElementById('si-subtab-' + t);
+                const btn = document.getElementById('si-subtab-btn-' + t);
+                if (panel) panel.classList.toggle('hidden', t !== tab);
+                if (btn) {
+                    btn.className = (t === tab)
+                        ? 'px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-indigo-600 text-white shadow-sm flex items-center gap-1.5'
+                        : 'px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-slate-200 text-slate-700 hover:bg-slate-300 flex items-center gap-1.5';
+                }
+            });
+            const commonCtrl = document.getElementById('si-common-controls');
+            if (commonCtrl) commonCtrl.classList.toggle('hidden', tab !== 'common');
+        }
+
+        function setCommonHoldingsMode(multiOnly) {
+            commonHoldingsMultiOnly = !!multiOnly;
+            renderSuperinvestorsCommonHoldings();
+        }
+
+        function renderSuperinvestorsCommonHoldings() {
+            const tbody = document.getElementById('si-common-tbody');
+            if (!tbody || !superinvestorsData) return;
+            const screenerOnlyCb = document.getElementById('si-common-screener-only');
+            const screenerOnly = screenerOnlyCb ? screenerOnlyCb.checked : false;
+            const q = (superinvestorSearchQuery || '').trim().toLowerCase();
+
+            const rows = (superinvestorsData.common_holdings || []).filter(r => {
+                if (commonHoldingsMultiOnly && (r.holder_count || 0) < 2) return false;
+                if (screenerOnly && !r.in_screener) return false;
+                if (q) {
+                    const matchT = (r.ticker || '').toLowerCase().includes(q);
+                    const matchN = (r.company_name || '').toLowerCase().includes(q);
+                    const matchH = (r.holders || []).some(h => (h.manager_name || '').toLowerCase().includes(q));
+                    if (!matchT && !matchN && !matchH) return false;
+                }
+                return true;
+            });
+
+            if (!rows.length) {
+                tbody.innerHTML = '<tr><td colspan="10" class="py-8 text-center text-slate-400">No common holdings match the selected filters.</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = rows.map(r => {
+                const holderBadges = (r.holders || []).map(h => {
+                    const act = String(h.qoq_action || '').toUpperCase();
+                    const actDot = act === 'NEW' ? '🟢' : (act === 'ADDED' ? '🔼' : (act === 'REDUCED' ? '🔽' : ''));
+                    const w = h.portfolio_weight_pct != null ? Number(h.portfolio_weight_pct).toFixed(1) + '%' : '';
+                    return `<button type="button" onclick="selectSuperinvestor('${escapeHtml(h.manager_id || '')}')"
+                                class="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-semibold bg-indigo-50 hover:bg-indigo-100 text-indigo-800 border border-indigo-200 transition"
+                                title="Click to view ${escapeHtml(h.manager_name)}'s full portfolio (${w})">
+                                <span>${escapeHtml(h.manager_name)}</span>
+                                <span class="text-indigo-500 font-mono">${w}</span>
+                                ${actDot ? `<span>${actDot}</span>` : ''}
+                            </button>`;
+                }).join(' ');
+
+                const actSummary = [];
+                if ((r.new_count || 0) > 0) actSummary.push(`<span class="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold text-[10px]">+${r.new_count} NEW</span>`);
+                if ((r.added_count || 0) > 0) actSummary.push(`<span class="px-1.5 py-0.5 rounded bg-teal-100 text-teal-800 font-bold text-[10px]">▲${r.added_count} ADD</span>`);
+                if ((r.reduced_count || 0) > 0) actSummary.push(`<span class="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 font-bold text-[10px]">▼${r.reduced_count} TRIM</span>`);
+
+                return `
+                    <tr class="hover:bg-slate-50/90">
+                        <td class="py-2.5 px-3">
+                            <button type="button" onclick="showModal('${escapeHtml(r.ticker)}')" class="font-bold text-indigo-700 hover:underline font-mono text-xs">${escapeHtml(r.ticker)}</button>
+                        </td>
+                        <td class="py-2.5 px-3 font-medium text-slate-800 max-w-[200px] truncate" title="${escapeHtml(r.company_name || '')}">${escapeHtml(r.company_name || '')}</td>
+                        <td class="py-2.5 px-2 text-center">
+                            <span class="px-2.5 py-0.5 rounded-full font-black text-xs ${(r.holder_count || 0) >= 3 ? 'bg-indigo-600 text-white' : 'bg-indigo-100 text-indigo-800'}">${r.holder_count || 0}</span>
+                        </td>
+                        <td class="py-2.5 px-3"><div class="flex flex-wrap gap-1">${holderBadges}</div></td>
+                        <td class="py-2.5 px-2 text-right font-bold text-slate-800">${r.combined_weight_pct != null ? Number(r.combined_weight_pct).toFixed(2) + '%' : '—'}</td>
+                        <td class="py-2.5 px-2 text-right text-slate-600">${r.max_weight_pct != null ? Number(r.max_weight_pct).toFixed(2) + '%' : '—'}</td>
+                        <td class="py-2.5 px-2 text-right font-semibold text-slate-700">${fmtUsdCompact(r.combined_value_usd)}</td>
+                        <td class="py-2.5 px-2 text-center">${actSummary.length ? actSummary.join(' ') : '<span class="text-[10px] text-slate-400">Held</span>'}</td>
+                        <td class="py-2.5 px-2 text-right">${renderPrice52wCell(r)}</td>
+                        <td class="py-2.5 px-3 text-right">${renderScreenerMetricsCell(r)}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        function renderSuperinvestorsActivity() {
+            const buysTbody = document.getElementById('si-buys-tbody');
+            const sellsTbody = document.getElementById('si-sells-tbody');
+            const buysBadge = document.getElementById('si-buys-badge');
+            const sellsBadge = document.getElementById('si-sells-badge');
+            if (!buysTbody || !sellsTbody || !superinvestorsData) return;
+
+            const q = (superinvestorSearchQuery || '').trim().toLowerCase();
+            const filterFn = (item) => {
+                if (!q) return true;
+                return (item.ticker || '').toLowerCase().includes(q)
+                    || (item.issuer_name || '').toLowerCase().includes(q)
+                    || (item.manager_name || '').toLowerCase().includes(q);
+            };
+
+            const buys = (superinvestorsData.recent_buys || []).filter(filterFn);
+            const sells = (superinvestorsData.recent_sells || []).filter(filterFn);
+            if (buysBadge) buysBadge.textContent = `${buys.length} filings`;
+            if (sellsBadge) sellsBadge.textContent = `${sells.length} filings`;
+
+            buysTbody.innerHTML = buys.length ? buys.slice(0, 120).map(b => {
+                const delta = b.qoq_shares_change_pct != null && Number.isFinite(Number(b.qoq_shares_change_pct))
+                    ? `+${Number(b.qoq_shares_change_pct).toFixed(1)}%`
+                    : 'New';
+                return `
+                    <tr class="hover:bg-emerald-50/40">
+                        <td class="py-2 px-2.5">
+                            <button type="button" onclick="showModal('${escapeHtml(b.ticker)}')" class="font-bold text-indigo-700 hover:underline font-mono">${escapeHtml(b.ticker)}</button>
+                            <div class="text-[10px] text-slate-500 truncate max-w-[140px]">${escapeHtml(b.issuer_name || '')}</div>
+                        </td>
+                        <td class="py-2 px-2">
+                            <button type="button" onclick="selectSuperinvestor('${escapeHtml(b.manager_id)}')" class="text-left font-medium text-slate-800 hover:text-indigo-600 hover:underline">${escapeHtml(b.manager_name)}</button>
+                            <div class="text-[10px] text-slate-400">${escapeHtml(b.report_date || '')}</div>
+                        </td>
+                        <td class="py-2 px-2 text-center">${renderQoqActionBadge(b.qoq_action)}</td>
+                        <td class="py-2 px-2 text-right font-semibold text-emerald-600">${delta}</td>
+                        <td class="py-2 px-2 text-right font-bold text-slate-800">${b.portfolio_weight_pct != null ? Number(b.portfolio_weight_pct).toFixed(2) + '%' : '—'}</td>
+                        <td class="py-2 px-2.5 text-right text-slate-700">${fmtUsdCompact(b.value_usd)}</td>
+                    </tr>
+                `;
+            }).join('') : '<tr><td colspan="6" class="py-6 text-center text-slate-400">No recent buys match filter.</td></tr>';
+
+            sellsTbody.innerHTML = sells.length ? sells.slice(0, 120).map(s => {
+                const isExit = String(s.qoq_action || '').toUpperCase() === 'EXITED';
+                const delta = s.qoq_shares_change_pct != null && Number.isFinite(Number(s.qoq_shares_change_pct))
+                    ? `${Number(s.qoq_shares_change_pct).toFixed(1)}%`
+                    : (isExit ? '-100%' : '—');
+                const valCell = isExit
+                    ? `<span class="text-slate-400 line-through">${fmtUsdCompact(s.prev_value_usd)}</span>`
+                    : fmtUsdCompact(s.value_usd);
+                return `
+                    <tr class="hover:bg-rose-50/40">
+                        <td class="py-2 px-2.5">
+                            ${s.ticker ? `<button type="button" onclick="showModal('${escapeHtml(s.ticker)}')" class="font-bold text-indigo-700 hover:underline font-mono">${escapeHtml(s.ticker)}</button>` : `<span class="font-mono text-slate-400">${escapeHtml((s.cusip || '').slice(0, 6))}</span>`}
+                            <div class="text-[10px] text-slate-500 truncate max-w-[140px]">${escapeHtml(s.issuer_name || '')}</div>
+                        </td>
+                        <td class="py-2 px-2">
+                            <button type="button" onclick="selectSuperinvestor('${escapeHtml(s.manager_id)}')" class="text-left font-medium text-slate-800 hover:text-indigo-600 hover:underline">${escapeHtml(s.manager_name)}</button>
+                            <div class="text-[10px] text-slate-400">${escapeHtml(s.report_date || '')}</div>
+                        </td>
+                        <td class="py-2 px-2 text-center">${renderQoqActionBadge(s.qoq_action)}</td>
+                        <td class="py-2 px-2 text-right font-semibold text-rose-600">${delta}</td>
+                        <td class="py-2 px-2 text-right font-bold text-slate-800">${isExit ? '0.00%' : (s.portfolio_weight_pct != null ? Number(s.portfolio_weight_pct).toFixed(2) + '%' : '—')}</td>
+                        <td class="py-2 px-2.5 text-right text-slate-700">${valCell}</td>
+                    </tr>
+                `;
+            }).join('') : '<tr><td colspan="6" class="py-6 text-center text-slate-400">No recent sells match filter.</td></tr>';
+        }
+
+        function renderSuperinvestorsAsxNotices() {
+            const tbody = document.getElementById('si-asx-tbody');
+            if (!tbody || !superinvestorsData) return;
+            const q = (superinvestorSearchQuery || '').trim().toLowerCase();
+            const notices = (superinvestorsData.asx_substantial_notices || []).filter(n => {
+                if (!q) return true;
+                return (n.ticker || '').toLowerCase().includes(q)
+                    || (n.company_name || '').toLowerCase().includes(q)
+                    || (n.headline || '').toLowerCase().includes(q);
+            });
+            if (!notices.length) {
+                tbody.innerHTML = '<tr><td colspan="7" class="py-8 text-center text-slate-400">No ASX Form 603/604 substantial holder notices found in the trailing 180 days.</td></tr>';
+                return;
+            }
+            tbody.innerHTML = notices.map(n => {
+                const nt = String(n.notice_type || '');
+                const badgeCls = nt.includes('603')
+                    ? 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                    : (nt.includes('605') ? 'bg-rose-100 text-rose-800 border-rose-200' : 'bg-indigo-100 text-indigo-800 border-indigo-200');
+                const headlineHtml = n.document_url
+                    ? `<a href="${escapeHtml(n.document_url)}" target="_blank" rel="noopener" class="text-indigo-600 hover:underline font-medium flex items-center gap-1">
+                        <span>${escapeHtml(n.headline || 'Substantial Holder Notice')}</span>
+                        <i class="fa-solid fa-file-pdf text-[10px]"></i>
+                       </a>`
+                    : `<span class="text-slate-700">${escapeHtml(n.headline || '')}</span>`;
+                return `
+                    <tr class="hover:bg-slate-50">
+                        <td class="py-2 px-3 text-slate-500 font-mono">${escapeHtml(n.notice_date || '—')}</td>
+                        <td class="py-2 px-3">
+                            <button type="button" onclick="showModal('${escapeHtml(n.ticker)}')" class="font-bold text-indigo-700 hover:underline font-mono">${escapeHtml(n.ticker)}</button>
+                        </td>
+                        <td class="py-2 px-3 font-medium text-slate-800">${escapeHtml(n.company_name || '')}</td>
+                        <td class="py-2 px-2 text-center"><span class="px-2 py-0.5 rounded-full text-[10px] font-bold border ${badgeCls}">${escapeHtml(nt || 'Substantial')}</span></td>
+                        <td class="py-2 px-3">${headlineHtml}</td>
+                        <td class="py-2 px-2 text-right">${renderPrice52wCell(n)}</td>
+                        <td class="py-2 px-3 text-right">${renderScreenerMetricsCell(n)}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        function onSuperinvestorSearch(val) {
+            superinvestorSearchQuery = val || '';
+            renderSuperinvestorsTab();
+        }
+
         async function switchMarket(m) {
             const loadId = ++activeLoadId;
 
@@ -8261,6 +9196,14 @@
                 await loadCommoditiesTab(false);
                 return;
             }
+            if (m === 'superinvestors') {
+                currentMarket = 'superinvestors';
+                updateMarketButtons(m);
+                setSpecialViewVisible('superinvestors');
+                savePrefs();
+                await loadSuperinvestorsTab(false);
+                return;
+            }
 
             setSpecialViewVisible(null);
             if (m === 'buybacks') {
@@ -8278,6 +9221,10 @@
             } else if (m === 'watchlist') {
                 currentSortCol = 'pct_from_52w_low';
                 currentSortDir = 'asc';
+                currentView = 'all';
+            } else if (m === 'pitches') {
+                currentSortCol = 'pitch_date';
+                currentSortDir = 'desc';
                 currentView = 'all';
             }
 
@@ -8326,6 +9273,11 @@
             }
             if (currentMarket === 'commodities') {
                 loadCommoditiesTab(true);
+                savePrefs();
+                return;
+            }
+            if (currentMarket === 'superinvestors') {
+                refreshSuperinvestors(false);
                 savePrefs();
                 return;
             }
@@ -8896,7 +9848,7 @@
                 currentBusinessList = (bb && (bb.list_id || bb.filename))
                     || businessLists[0].list_id || businessLists[0].filename || '';
             }
-            const startMarket = (prefs.market === 'buybacks' || prefs.market === 'business' || prefs.market === 'indices' || prefs.market === 'commodities' || prefs.market === 'watchlist')
+            const startMarket = (prefs.market === 'buybacks' || prefs.market === 'business' || prefs.market === 'indices' || prefs.market === 'commodities' || prefs.market === 'watchlist' || prefs.market === 'pitches' || prefs.market === 'superinvestors')
                 ? prefs.market
                 : 'business';
             if (startMarket === 'buybacks') {
@@ -8907,6 +9859,10 @@
                 await switchMarket('commodities');
             } else if (startMarket === 'watchlist') {
                 await switchMarket('watchlist');
+            } else if (startMarket === 'pitches') {
+                await switchMarket('pitches');
+            } else if (startMarket === 'superinvestors') {
+                await switchMarket('superinvestors');
             } else {
                 updateMarketButtons('business');
                 setIndicesViewVisible(false);

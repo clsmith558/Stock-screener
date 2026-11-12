@@ -1,0 +1,65 @@
+Analyzed __init__.py:L1-70
+Analyzed historical_snapshots.py:L1-90
+Analyzed supervised_calibration.py:L1-90
+Analyzed macro_econometrics.py:L1-60
+Analyzed nlp_filings.py:L1-50
+
+Your screener at [`C:\Grok\Stock screener`](file:///C:/Grok/Stock%20screener) already has a strong foundation: point-in-time monthly snapshots ([`historical_snapshots.py`](file:///C:/Grok/Stock%20screener/scoring/historical_snapshots.py)), walk-forward insider/buyback calibration ([`supervised_calibration.py`](file:///C:/Grok/Stock%20screener/scoring/supervised_calibration.py)), commodity unit-cost/cointegration models ([`macro_econometrics.py`](file:///C:/Grok/Stock%20screener/scoring/macro_econometrics.py)), and filing NLP ([`nlp_filings.py`](file:///C:/Grok/Stock%20screener/scoring/nlp_filings.py)).
+
+To sustain **20%+ annualized returns** with a deep-value strategy, the biggest hurdle is **separating multi-bagger mean-reversions from terminal value traps**—and avoiding look-ahead or survivorship bias when training your models.
+
+The highest-leverage data to start capturing **right now** is **ephemeral point-in-time state**—data that is free today via APIs/filings, but gets overwritten every month and costs tens of thousands of dollars to buy historically later.
+
+---
+
+### 1. Ephemeral Consensus & Estimate Revisions (Overwritten Monthly)
+Why a stock is at 5x P/E matters: if forward EPS estimates are falling 10% every month, a 5x P/E is actually a 15x P/E in disguise. The highest-alpha deep-value entry is when price is still at 52-week lows **while negative analyst revisions flatten out or inflect upward**.
+* **What to capture in [`monthly_stock_snapshots`](file:///C:/Grok/Stock%20screener/scoring/historical_snapshots.py#L60-L90) right now (free via `yfinance` `info` / `eps_trend`):**
+  * `forward_eps_current_yr` & `forward_eps_next_yr` (tracks month-over-month estimate drift $\Delta \text{EPS}_{1\text{m}}, \Delta \text{EPS}_{3\text{m}}$)
+  * `analyst_count` & `recommendation_mean` (Templeton "neglect / maximum pessimism" gauge—0 to 2 analysts or consensus "Sell/Hold" outperforms crowded "Strong Buys" in deep value)
+  * `target_low_price` & `target_mean_price` (measures price vs. even the most bearish street target)
+
+### 2. Short Interest & Positioning Dynamics (Burry Squeeze & Trap Filter)
+`yfinance` exposes current short interest, but does not give you a clean multi-year historical series once the month rolls over.
+* **What to snapshot monthly:**
+  * `short_pct_float` and `short_ratio` (Days to Cover)
+  * `shares_short_mom_change_pct` (Short covering beginning while price is near 52w lows is a classic breakout precursor; conversely, surging short interest alongside insider selling flags accounting/solvency trouble)
+
+### 3. Forensic Balance-Sheet Survival & True "Owner Earnings"
+Deep value portfolios generate 20%+ CAGR not by picking 100% winners, but by **eliminating the 20% of cheap stocks that go to zero** or dilute shareholders at the bottom.
+* **True FCF after Stock-Based Compensation (`sbc_adjusted_fcf_yield`)**: In tech/fintech (e.g., `PYPL`, `CRM`), headline FCF ignores heavy SBC dilution. Capturing $\frac{\text{FCF} - \text{SBC}}{\text{Market Cap}}$ prevents overpaying for optical FCF.
+* **Net Diluted Share Count Velocity (`shares_out_1y_delta_pct`, `shares_out_3y_delta_pct`)**: Rather than just tracking *announced* or gross buybacks, track actual net change in diluted shares outstanding. A company announcing buybacks while net share count rises is a red flag; a company cannibalizing >5% of its float net per year near 52w lows is a prime compounder.
+* **Piotroski F-Score (0–9) & Solvency Components**:
+  * `interest_coverage` ($\text{EBIT} / \text{Interest Expense}$) and `net_debt_to_ebitda`
+  * `current_ratio_yoy_delta` and `gross_margin_yoy_delta`
+  * `sloan_accrual_ratio`: $\frac{\text{Net Income} - \text{Operating Cash Flow}}{\text{Total Assets}}$ (catches aggressive accounting before restatements hit).
+
+### 4. Capital-Cycle Supply Starvation Metrics
+Referring to your [`pariah_filter.py`](file:///C:/Grok/Stock%20screener/data/pariah_filter.py) and capital-cycle framework, deep value performs best when capital is fleeing an entire sector.
+* **What to capture:**
+  * **Company & Sector $\text{Capex} / \text{Depreciation}$ Ratio**: When an industry’s aggregate $\text{Capex} / \text{D\&A} < 0.8\times$ for multiple quarters, physical capacity is shrinking—setting up future pricing power even without demand growth.
+  * **Inventory-to-Sales Velocity ($\Delta \text{Inventory YoY} - \Delta \text{Revenue YoY}$)**: Rising finished goods inventory faster than sales warns of margin compression ahead; lean inventories at cyclical trough signal operating leverage on recovery.
+
+### 5. Automated "Superinvestor" 13F & Substantial Holder Tracking
+Your Obsidian vault already includes a `[[Shameless-Cloner]]` gate.
+* **What to capture quarterly/monthly:**
+  * **Curated Value 13F Holdings Table**: A lightweight script pulling SEC 13F-HR XMLs for ~15–20 high-conviction deep-value managers (e.g., Scion/Burry, Pabrai, Baupost, Greenlight, Kopernik, Horizon Kinetics, Fairfax) + ASX Form 603/604 notices.
+  * Recording `cloner_holder_count`, `new_position_flag`, and `max_portfolio_weight_pct` gives your supervised model in [`supervised_calibration.py`](file:///C:/Grok/Stock%20screener/scoring/supervised_calibration.py) an institutional conviction feature alongside insider buying.
+
+### 6. Execution Realism & Microstructure (For a Future Automated Bot)
+Many deep-value screens show 25%+ paper returns that vanish in live trading due to illiquidity.
+* **What to snapshot now:**
+  * `median_daily_dollar_volume_20d` (to model position sizing limits—e.g. max 5% of daily volume)
+  * `return_volatility_60d` and `max_drawdown_1y` (for Kelly / volatility-adjusted position sizing)
+
+### 7. Structured "Pitch-to-Outcome" Feedback Ledger
+Now that **Daily Stock Pitcher** runs every morning at 8:00 AM, every brief is a point-in-time investment hypothesis.
+* **What to log:** Append a structured record to a local SQLite table (`pitch_ledger`) or JSONL file every time a pitch is generated:
+  * `pitch_date`, `ticker`, `price_at_pitch`, `quant_score`, `qual_score`, `forward_pe`, `p_fcf`, `sbc_adj_fcf_yield`, `short_pct_float`, `primary_thesis_type` (`cigar_butt` vs `compounder`), and `ai_conviction_score`.
+  * Automatically backfill `ret_1m`, `ret_3m`, `ret_6m`, `ret_12m`, and `max_adverse_excursion` (worst drawdown after pitch).
+  * Within 6–12 months, you will have a proprietary dataset training your bot on **which combination of quantitative screen + qualitative thesis actually produced >20% annualized winners**.
+
+---
+
+### Recommended Next Step
+If you'd like, we can start by **extending [`scoring/historical_snapshots.py`](file:///C:/Grok/Stock%20screener/scoring/historical_snapshots.py)** and [`data/yf_helpers.py`](file:///C:/Grok/Stock%20screener/data/yf_helpers.py) so your monthly snapshots immediately start preserving **ephemeral short interest, analyst EPS estimate revisions, net share count delta (3Y/1Y dilution/cannibalization), and Piotroski/interest-coverage metrics**, plus a **`pitch_ledger` table** for your daily briefs. Would you like me to inspect [`data/yf_helpers.py`](file:///C:/Grok/Stock%20screener/data/yf_helpers.py) and wire those columns in?

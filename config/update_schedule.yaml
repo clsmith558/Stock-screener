@@ -63,21 +63,52 @@ jobs:
       - "3"
     timeout_seconds: 3600
 
-  # S&P 500 + custom Business list CSVs + buybacks registry (not full ASX)
-  # Skips Japan/Korea/small-cap dumps (>800 names) so the job finishes.
+  # S&P 500 + custom Business list CSVs <=800 tickers (buybacks & >800 lists split out)
   - id: yf_lists
     enabled: true
     max_age_hours: 72
-    description: yfinance for S&P500, mid-size business CSVs, buybacks (stale >7d)
+    description: yfinance for S&P500 & business CSVs <=800 tickers (stale >7d)
     command:
       - scripts/rebuild_yf_cache.py
       - --scope
-      - lists
+      - business
       - --max-cache-days
       - "7"
       - --max-list-size
       - "800"
-    timeout_seconds: 14400
+    timeout_seconds: 7200
+
+  # Buybacks & insider registry YF cache (chunked oldest-first so runs stay <2.5h)
+  - id: yf_buybacks
+    enabled: true
+    max_age_hours: 48
+    description: yfinance for buyback & insider registry (chunked oldest-first, stale >7d)
+    command:
+      - scripts/rebuild_yf_cache.py
+      - --scope
+      - buybacks
+      - --max-cache-days
+      - "7"
+      - --max-symbols
+      - "1500"
+    timeout_seconds: 9000
+
+  # Rotating oldest-first chunk across >800-ticker Business CSVs + full ASX universe (~50 min/day)
+  - id: yf_large_and_asx
+    enabled: true
+    max_age_hours: 24
+    description: Rotating/chunked yfinance refresh for >800-ticker lists + full ASX (oldest-first)
+    command:
+      - scripts/rebuild_yf_cache.py
+      - --scope
+      - large-and-asx
+      - --max-cache-days
+      - "14"
+      - --max-list-size
+      - "800"
+      - --max-symbols
+      - "900"
+    timeout_seconds: 7200
 
   # US SEC 8-K / 10-Q buyback + Form 4 insider scan (slow; weekly)
   - id: us_sec_buybacks
@@ -87,11 +118,11 @@ jobs:
     command: [scripts/collect_us_buybacks.py]
     timeout_seconds: 14400
 
-  # Full ASX listed universe — hours; keep off unless you want weekly overnight runs
+  # Full ASX listed universe in one shot — disabled by default (yf_large_and_asx rotates ASX daily)
   - id: yf_asx_full
     enabled: false
     max_age_hours: 336
-    description: yfinance full ASX universe (slow; enable for ~biweekly catch-up)
+    description: yfinance full ASX universe (manual/one-shot; yf_large_and_asx handles rotation)
     command:
       - scripts/rebuild_yf_cache.py
       - --scope
@@ -99,6 +130,28 @@ jobs:
       - --max-cache-days
       - "14"
     timeout_seconds: 28800
+
+  # --- Global Index, Unsupervised ML & Monthly Snapshot caches (previously Flask-only) ---
+  - id: index_series_cache
+    enabled: true
+    max_age_hours: 24
+    description: Refresh global index prices, drawdown stats, ETF PEs & Multpl SP500 PE
+    command: [scripts/refresh_index_cache.py]
+    timeout_seconds: 600
+
+  - id: ml_global
+    enabled: true
+    max_age_hours: 168
+    description: Rebuild global Unsupervised ML profiles (K-Means, k-NN, IsoForest, PCA)
+    command: [scripts/rebuild_ml_global.py]
+    timeout_seconds: 600
+
+  - id: monthly_snapshots
+    enabled: true
+    max_age_hours: 24
+    description: Capture YYYY-MM point-in-time snapshot (if due) & update forward returns
+    command: [scripts/capture_monthly_snapshot.py]
+    timeout_seconds: 600
 
   # Inactive / delisted hygiene — keep YF queues lean
   - id: inactive_hygiene

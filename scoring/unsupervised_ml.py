@@ -763,6 +763,67 @@ def load_full_global_stock_universe(db_path: str = "asx_announcements_cache.db")
                 "annual_buyback_pct": m.get("annual_buyback_pct", 0),
                 "metrics": m,
             }
+
+        # 3. Merge cached SEC EDGAR metrics (ROIC, 5y net share count delta, earnings YoY)
+        try:
+            cur_edgar = conn.execute("SELECT ticker, metrics_json FROM us_edgar_cache")
+            for et, emj in cur_edgar.fetchall():
+                sym_e = (et or "").strip().upper()
+                if sym_e not in rows or not emj:
+                    continue
+                try:
+                    ed = json.loads(emj)
+                except Exception:
+                    continue
+                st = rows[sym_e]
+                m = st.setdefault("metrics", {})
+                if ed.get("roic_latest") and not m.get("roic"):
+                    m["roic"] = ed["roic_latest"]
+                if ed.get("roic_5y_avg") is not None:
+                    m["roic_5y_avg"] = ed["roic_5y_avg"]
+                if ed.get("share_count_5y_change_pct") is not None:
+                    m["share_count_5y_change_pct"] = ed["share_count_5y_change_pct"]
+                if ed.get("earnings_yoy_pct") is not None:
+                    m["earnings_yoy_pct"] = ed["earnings_yoy_pct"]
+                if ed.get("earnings_5y_growth_pct") is not None:
+                    m["earnings_5y_growth_pct"] = ed["earnings_5y_growth_pct"]
+        except Exception:
+            pass
+
+        # 4. Merge Superinvestor 13F & ASX substantial holder summary (Step 5)
+        try:
+            cur_13f = conn.execute(
+                """
+                SELECT ticker, cloner_holder_count, cloner_new_position_flag,
+                       cloner_max_weight_pct, cloner_holders_summary, asx_subst_notices_180d
+                FROM superinvestor_stock_summary
+                """
+            )
+            for (
+                ct,
+                c_cnt,
+                c_new,
+                c_max_w,
+                c_sum,
+                c_asx_n,
+            ) in cur_13f.fetchall():
+                sym_c = (ct or "").strip().upper()
+                st = rows.get(sym_c) or rows.get(f"{sym_c}.AX")
+                if not st:
+                    continue
+                m = st.setdefault("metrics", {})
+                st["cloner_holder_count"] = int(c_cnt or 0)
+                st["cloner_new_position_flag"] = int(c_new or 0)
+                st["cloner_max_weight_pct"] = c_max_w
+                st["cloner_holders_summary"] = c_sum or ""
+                m["cloner_holder_count"] = int(c_cnt or 0)
+                m["cloner_new_position_flag"] = int(c_new or 0)
+                m["cloner_max_weight_pct"] = c_max_w
+                m["cloner_holders_summary"] = c_sum or ""
+                if c_asx_n is not None:
+                    m["asx_subst_notices_180d"] = int(c_asx_n or 0)
+        except Exception:
+            pass
     except Exception as e:
         logger.warning("load_full_global_stock_universe partial error: %s", e)
     finally:

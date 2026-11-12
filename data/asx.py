@@ -187,6 +187,7 @@ def _metrics_from_yf_info(info: dict, price: float, ma_200w=0, pct_from_200w_ma=
     """
     from data.yf_helpers import (
         calc_enterprise_value,
+        calc_ephemeral_point_in_time_metrics,
         calc_fcf_metrics,
         calc_leverage_metrics,
         calc_p_fcf,
@@ -279,7 +280,15 @@ def _metrics_from_yf_info(info: dict, price: float, ma_200w=0, pct_from_200w_ma=
         if yf_peg and yf_peg > 0:
             peg = _safe_round(yf_peg, 2)
 
-    return {
+    ephemeral_bits = calc_ephemeral_point_in_time_metrics(
+        info,
+        price,
+        mcap=mcap,
+        ocf_raw=ocf_raw,
+        fx_scale=fx_scale,
+    )
+
+    out_metrics = {
         "pe": _safe_round(pe, 1),
         "forward_pe": _safe_round(info.get("forwardPE"), 1),
         "pb": _safe_round(pb, 2),
@@ -331,6 +340,8 @@ def _metrics_from_yf_info(info: dict, price: float, ma_200w=0, pct_from_200w_ma=
         "own_hist_cheap": False,
         "own_hist_label": "unknown",
     }
+    out_metrics.update(ephemeral_bits)
+    return out_metrics
 
 
 def _calc_ma200w_gap(yt, price=None, hist=None):

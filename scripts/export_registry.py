@@ -63,7 +63,7 @@ def main():
         sys.exit(1)
     payload = export_registry(vault, args.out)
     n = len(payload.get("companies") or {})
-    print(f"Exported {n} companies → {args.out}")
+    print(f"Exported {n} companies -> {args.out}")
 
 
 if __name__ == "__main__":

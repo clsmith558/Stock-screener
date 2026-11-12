@@ -126,6 +126,10 @@ def get_stocks_for_market(
         from data.watchlist import fetch_watchlist_stocks
 
         stocks = fetch_watchlist_stocks()
+    elif market == "pitches":
+        from data.pitch_ledger import fetch_pitched_stocks
+
+        stocks = fetch_pitched_stocks()
     elif market in ("business", "buybacks"):
         from data.business_lists import BUILTIN_BUYBACKS_LIST_ID, fetch_business_list_stocks
         lid = list_id or (BUILTIN_BUYBACKS_LIST_ID if market == "buybacks" else "")
@@ -167,6 +171,17 @@ def _get_market_meta(market: str, list_id: str = None):
             "market": "watchlist",
             "universe_count": n,
             "watchlist_count": n,
+        }
+    if market == "pitches":
+        from data.pitch_ledger import list_pitch_ledger
+
+        n = len(list_pitch_ledger())
+        return {
+            "data_source": "Daily Stock Pitcher ledger (local SQLite + Obsidian)",
+            "last_scraped": datetime.now().isoformat(),
+            "market": "pitches",
+            "universe_count": n,
+            "pitches_count": n,
         }
     if market == "business":
         try:
@@ -550,19 +565,19 @@ def api_stocks():
         fast=fast,
     )
     rank = request.args.get("rank", "1").lower() not in ("0", "false", "no")
-    if rank and stocks and market != "watchlist":
+    if rank and stocks and market not in ("watchlist", "pitches"):
         try:
             from data.wiki_bridge import enrich_stocks_with_opportunities
             stocks = enrich_stocks_with_opportunities(stocks)
         except Exception as e:
             logger.warning("Opportunity enrichment failed: %s", e)
-    elif market == "watchlist" and stocks:
+    elif market in ("watchlist", "pitches") and stocks:
         # Light rank pass when scores already present from cache; skip heavy recompute
         try:
             from data.wiki_bridge import enrich_stocks_with_opportunities
             stocks = enrich_stocks_with_opportunities(stocks)
         except Exception as e:
-            logger.debug("Watchlist opportunity enrich: %s", e)
+            logger.debug("Watchlist/Pitches opportunity enrich: %s", e)
     meta = _get_market_meta(market, list_id=list_id)
     meta["full"] = bool(full)
     meta["force_yf"] = bool(force_yf)
@@ -572,6 +587,50 @@ def api_stocks():
     meta["rank_enriched"] = rank
     meta["total_universe"] = meta.get("universe_count") or (len(stocks) if not full else None)
     return jsonify({"stocks": stocks, "meta": meta})
+
+
+@app.route("/api/superinvestors", methods=["GET"])
+def api_superinvestors_get():
+    """Return Superinvestor 13F & ASX substantial holder dashboard + stock summaries (Step 5)."""
+    try:
+        from data.superinvestor_13f import (
+            get_superinvestor_dashboard_data,
+            get_superinvestor_summary_for_ticker,
+        )
+
+        ticker = (request.args.get("ticker") or "").strip().upper()
+        if ticker:
+            return jsonify({
+                "ticker": ticker,
+                "summary": get_superinvestor_summary_for_ticker(ticker),
+            })
+        dash = get_superinvestor_dashboard_data()
+        dash["ok"] = True
+        dash["managers_tracked"] = (dash.get("kpi") or {}).get("managers_tracked", 0)
+        dash["total_tickers_held"] = (dash.get("kpi") or {}).get("total_unique_tickers", 0)
+        dash["top_holdings"] = dash.get("common_holdings", [])[:100]
+        return jsonify(dash)
+    except Exception as e:
+        logger.exception("api_superinvestors_get failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/superinvestors/refresh", methods=["POST"])
+def api_superinvestors_refresh():
+    """Fetch latest SEC 13F-HR filings for curated Superinvestors and rebuild stock summaries."""
+    try:
+        from data.superinvestor_13f import (
+            collect_and_rebuild_superinvestor_13f,
+            get_superinvestor_dashboard_data,
+        )
+
+        fetch_sec = _bool_arg("fetch_sec", default=True)
+        res = collect_and_rebuild_superinvestor_13f(fetch_sec=fetch_sec)
+        dash = get_superinvestor_dashboard_data()
+        return jsonify({"ok": True, "refresh": res, **dash})
+    except Exception as e:
+        logger.exception("api_superinvestors_refresh failed")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/watchlist", methods=["GET"])
@@ -1283,7 +1342,19 @@ def api_refresh():
     list_id = request.args.get("list", "")
     full = _bool_arg("full")
     force_yf = _bool_arg("force_yf")
-    if market == "business":
+    if market == "pitches":
+        from data.pitch_ledger import backfill_pitch_forensics, sync_obsidian_pitches
+        from data.superinvestor_13f import collect_and_rebuild_superinvestor_13f
+
+        try:
+            collect_and_rebuild_superinvestor_13f(fetch_sec=False)
+        except Exception as ex:
+            logger.debug("superinvestor_13f rebuild skipped on pitches refresh: %s", ex)
+        sync_obsidian_pitches(fetch_live_yf=True)
+        backfill_pitch_forensics(force=True)
+        stocks = get_stocks_for_market("pitches", force_yf=force_yf)
+        msg = f"Pitches ledger refreshed ({len(stocks)} pitches)"
+    elif market == "business":
         from data.business_lists import _business_cache as biz_cache
         biz_cache.clear()
         stocks = get_stocks_for_market("business", force_yf=force_yf, list_id=list_id)
